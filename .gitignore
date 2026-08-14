@@ -6,6 +6,12 @@ contracts/cache/
 contracts/broadcast/**/dry-run/
 contracts/broadcast/*/31337/
 
+# Bun workspace (packages/*, workers/*). bun.lock is committed.
+node_modules/
+packages/*/dist/
+workers/*/.wrangler/
+workers/*/.dev.vars
+
 # Environment
 .env
 .env.*

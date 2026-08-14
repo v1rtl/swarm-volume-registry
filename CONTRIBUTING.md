@@ -70,3 +70,23 @@ bound the value implies.
 - [`forge-std`](https://github.com/foundry-rs/forge-std) — Foundry stdlib.
 - [`ethersphere/storage-incentives`](https://github.com/ethersphere/storage-incentives), pinned to the tag of the live `PostageStamp` deployment (currently `v0.9.4`). Tests import `PostageStamp`, `PriceOracle`, and `TestToken` from this submodule so the suite runs against real bytecode rather than mocks.
 - [`OpenZeppelin/openzeppelin-contracts`](https://github.com/OpenZeppelin/openzeppelin-contracts), pinned to `v4.8.2`. `VolumeRegistry` itself does not depend on OpenZeppelin, but `storage-incentives` is a Hardhat project that imports `@openzeppelin/contracts/...` and resolves it from `node_modules/` at its own build time. When `forge` compiles those same sources here, it has no npm awareness, so the dependency must be supplied as a submodule with a matching remapping in `remappings.txt`. The pin tracks `storage-incentives@v0.9.4`'s `package.json`; bump it together with `storage-incentives` whenever a new PostageStamp deployment lands.
+
+## Keeper package
+
+`packages/ethswarm-volume-keeper` (the keeper cycle) and `workers/gas-boy` (the
+reference Cloudflare Worker) form a Bun workspace rooted at the repo root.
+
+```sh
+bun install
+bun run typecheck
+bun test packages/
+bun run build          # tsc → packages/ethswarm-volume-keeper/dist
+```
+
+The worker imports the package's `dist/`, so its scripts build the package
+first. It needs no chain access to typecheck; `bun run dev` in `workers/gas-boy`
+starts `wrangler dev` against `.dev.vars` (see `.dev.vars.example`).
+
+The package is deliberately free of transports, chain definitions, RPC
+endpoints, key handling and environment parsing — actions take a viem client
+the caller supplies. Those concerns belong in a bot, e.g. `workers/gas-boy`.
