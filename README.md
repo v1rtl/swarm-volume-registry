@@ -6,6 +6,11 @@ The contract does not custody BZZ, does not sign chunks, has no admin role, and 
 
 ## Deployments
 
+The deployments below are the early-alpha v1 contracts. The repository's v2 contract
+source removes unilateral volume ownership transfer; v2 addresses will be added after
+deployment. Until then, [`docs/usage.md`](./docs/usage.md) documents the deployed v1
+ABI and its mitigations.
+
 | Chain | `VolumeRegistry` | `graceBlocks` |
 |---|---|---|
 | Gnosis (chain 100) | `0x9639ae4c7a8fa9efe585738d516a3915ddd02aad` | `17280` (≈ 24 h at 5-second blocks) |
@@ -35,8 +40,8 @@ Separate chunk-signer addresses (owner ≠ signer) are supported but considered 
 
 ## Documentation
 
-- [`docs/usage.md`](./docs/usage.md) — integration reference. Role profiles, setup commands, API reference, event catalogue, retirement and revocation semantics, cost estimation, Bee upload guide.
-- [`docs/DESIGN.md`](./docs/DESIGN.md) — architecture. Data model, invariants, threat model, trigger semantics, survival-floor derivation, Postage constraints.
+- [`docs/usage.md`](./docs/usage.md) — deployed-v1 integration reference. Role profiles, setup commands, API reference, event catalogue, retirement and revocation semantics, cost estimation, Bee upload guide.
+- [`docs/DESIGN.md`](./docs/DESIGN.md) — v2 architecture. Data model, invariants, threat model, trigger semantics, survival-floor derivation, Postage constraints.
 - [`contracts/test/README.md`](./contracts/test/README.md) — testing strategy, mapping from `DESIGN.md` sections and invariants to test files, fork-test setup, coverage notes.
 
 ## Repository layout

@@ -50,13 +50,6 @@ contract RetirementEdgesTest is RegistryFixture {
         registry.deleteVolume(id);
     }
 
-    function test_retired_transferOwnershipReverts() public {
-        bytes32 id = _retiredVolume();
-        vm.prank(OWNER);
-        vm.expectRevert(VolumeRegistry.VolumeNotActive.selector);
-        registry.transferVolumeOwnership(id, OWNER_B);
-    }
-
     function test_retired_noTransferFromPayer() public {
         _activateAccount(OWNER, PAYER, _expectedCreateCharge(DEFAULT_DEPTH) * FUND_MULT);
         bytes32 id = _createDefaultVolume(OWNER, CHUNK_SIGNER);

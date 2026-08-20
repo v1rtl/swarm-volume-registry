@@ -1,6 +1,10 @@
-# Swarm Volume Registry — Design
+# Swarm Volume Registry v2 — Design
 
-This document fixes the architecture of the `VolumeRegistry` contract. Rationale is inline; constraints inherited from the underlying `PostageStamp` contract are summarised in §14.
+This document fixes the architecture of the v2 `VolumeRegistry` contract. V2 is the
+next deployment and deliberately removes v1's unilateral ownership-transfer surface.
+Rationale is inline; constraints inherited from the underlying `PostageStamp` contract
+are summarised in §14. The currently deployed v1 behavior remains documented in
+[`usage.md`](./usage.md).
 
 ## 1. Goals
 
@@ -13,12 +17,14 @@ Non-goals:
 - Reliability layer (keepalive timelock with claimable assets).
 - Safe `AllowanceModule` payment path (ERC20 approve only).
 - Owner-initiated EIP-712 auth flows.
+- Volume ownership transfer. The v2 owner is permanent; any future transfer mechanism
+  must require explicit recipient acceptance.
 
 ## 2. Actors
 
 | Actor | Type | Role |
 |---|---|---|
-| Owner | EOA or contract | Manages volume lifecycle: create, delete, transfer ownership, designate payer. |
+| Owner | EOA or contract | Creates and deletes volumes and designates a payer. Permanently bound to each volume it creates. |
 | Chunk signer | EOA | Signs chunks; identical to the underlying Postage batch owner. May equal the volume owner, or differ. |
 | Payer ("funding wallet") | EOA or Safe | Holds BZZ. Authorizes an owner as a permitted spender, revokes. |
 | Keeper ("gas boy") | Anyone | Off-chain service that calls `trigger(volumeId)` on a schedule. Pays xDAI for gas. |
@@ -41,7 +47,7 @@ External dependencies (unmodified):
 
 ```
 struct Volume {
-    address owner;          // set at create; mutable via transferOwnership
+    address owner;          // set at create; immutable for the volume's lifetime
     address chunkSigner;    // set at create; immutable (matches Postage batch owner)
     uint64  createdAt;      // block.timestamp at create
     uint64  ttlExpiry;      // 0 = no expiry
@@ -75,13 +81,10 @@ uint256   nextNonce;                            // monotonic counter passed to P
 - **Owner compromise.** While the account is active, the attacker can create arbitrary high-depth volumes and force topups on existing ones. The effective drain ceiling is whatever ERC20 allowance the payer has granted the registry — **this contract adds no further aggregate cap**. I8 is a per-call charge-correctness property, not an attacker-facing bound. Mitigations are detection + I9 (a single `revoke(owner)` disables the entire (owner, payer) pair in one tx) and payer hygiene (bounded periodic approvals rather than `approve(max_uint256)`).
 - **Payer compromise.** Outside the registry's protection boundary; if the payer's key is taken, funds are already under attacker control.
 
-**Known v1 transfer exposure.** `transferVolumeOwnership` is unilateral. An owner can
-transfer a volume to an address that did not agree to receive it; from that point,
-triggers resolve the recipient's account and can charge its payer if that account is
-active. The allowance still bounds aggregate exposure, and the recipient can delete the
-volume or revoke its account, but an automated keeper can charge the payer before the
-recipient reacts. v1 users must transfer only by prior agreement and keep payer
-allowances bounded.
+**No inbound-transfer exposure.** A volume's owner is fixed when the volume is created.
+No caller can attach an existing volume to another owner's account or redirect payer
+resolution to an address that did not consent. This deliberately removes v1's
+unilateral ownership-transfer behavior.
 
 The common profile owner == chunk-signer inherits the signer's threat class: the owner key is then also continuously hot. Users who want strong key isolation should keep owner and chunk-signer separate.
 
@@ -95,7 +98,10 @@ Invariants:
 - **I6 — Survival.** A volume whose last successful create-or-topup was at block `t0` is guaranteed to survive at least `f × graceBlocks` blocks from `t0` before its batch dies, where `f` is the realization floor derived in §10.1 (`f ≈ 0.9567` for the Gnosis default `graceBlocks = 17280`). Under flat or falling prices the bound is achieved with equality / exceeded.
 - **I7 — Removal finality.** A `Retired` volume cannot be revived, receives no further topups, and is removed from `activeVolumeIds`. Corollary: if no other volume uses the same `(owner, payer)` pair, no subsequent `trigger` or batched `trigger(ids[])` call can transfer BZZ from that payer on behalf of the retired volume.
 - **I8 — Charge correctness.** Every BZZ transfer the paymaster pulls from `accounts[owner].payer` equals the formula-computed amount and no more: exactly `max(0, graceBlocks × currentPrice − b.normalisedBalance) × (1 << v.depth)` per `trigger`, exactly `graceBlocks × currentPrice × (1 << depth)` per `createVolume`, and zero in any other code path. This is a mechanical-honesty property of the paymaster — the registry does not overcharge relative to the topup delivered to Postage. It is **not** an attacker-facing bound: an adversarial owner picks `depth` and call count, so aggregate exposure under owner compromise collapses to the payer's outstanding ERC20 allowance (see threat-model block above).
-- **I9 — Revocation atomicity.** A single `revoke(owner)` call causes every subsequent `trigger` on every volume owned by `owner` to take the `TopupSkipped(NoAuth)` branch (§8 step 5). Payer is resolved via `accounts[owner]` at trigger time rather than stored per-volume precisely so that revocation cost stays O(1) regardless of how many volumes the (owner, payer) pair manages.
+- **I9 — Revocation atomicity.** A single `revoke(owner)` call causes every subsequent `trigger` on every volume owned by `owner` to take the `TopupSkipped(NoAuth)` branch (§8 step 6). Payer is resolved via `accounts[owner]` at trigger time rather than stored per-volume precisely so that revocation cost stays O(1) regardless of how many volumes the (owner, payer) pair manages.
+- **I10 — Owner immutability.** A volume's `owner` is the address that called
+  `createVolume`, and no public or internal transition can change it. Consequently, no
+  existing volume can begin charging a different owner's payer account.
 
 ## 6. State machines
 
@@ -158,14 +164,11 @@ function createVolume(
 
 function deleteVolume(bytes32 volumeId) external;
 
-function transferVolumeOwnership(bytes32 volumeId, address newOwner) external;
-
 function designateFundingWallet(address payer) external;  // payer = 0 to clear
 ```
 
 - `createVolume` requires `accounts[msg.sender].active == true`. Initial per-chunk balance is not user-chosen: the registry computes `perChunk = currentPrice × graceBlocks` so the volume is born with exactly the runway described in §10.1. Total BZZ charge `= perChunk × (1 << depth)` is pulled from `accounts[msg.sender].payer` via ERC20 `transferFrom` (payer must have approved at least this amount). Registry then calls `PostageStamp.createBatch(chunkSigner, perChunk, depth, bucketDepth, nonce, immutableBatch)`, passing the internally-managed `nextNonce` (§4) and incrementing. Inserts into `activeVolumeIds`. The returned `volumeId` equals Postage's `batchId = keccak256(abi.encode(address(this), nonce))`; callers discover it via the return value or the `VolumeCreated` event. Postage's `minimumInitialBalancePerChunk` floor is guaranteed by the constructor check in §10.
 - `deleteVolume` requires `msg.sender == volume.owner && volume.status == Active`. Transitions to `Retired.OwnerDeleted`, swap-and-pop from active list. No on-chain refund (Postage has no reclaim).
-- `transferVolumeOwnership` requires `msg.sender == volume.owner`. Account context follows the new owner — volume's payer lookup will now use `accounts[newOwner]`. The recipient does not accept the transfer: if the new owner already has an active account, its payer can be charged by the next trigger. This is a known v1 exposure; transfers must be agreed off-chain before submission.
 - `designateFundingWallet` is unilateral owner action. Does not require any account state.
 
 ### 7.2 Payer API
@@ -242,7 +245,6 @@ The check order matters: batch/depth/TTL retire-edges are evaluated before auth/
 ```
 event VolumeCreated(bytes32 indexed volumeId, address indexed owner, address chunkSigner, uint8 depth, uint64 ttlExpiry);
 event VolumeRetired(bytes32 indexed volumeId, uint8 reason);  // OwnerDeleted | VolumeExpired | BatchDied | DepthChanged | BatchOwnerMismatch
-event VolumeOwnershipTransferred(bytes32 indexed volumeId, address indexed from, address indexed to);
 
 event PayerDesignated(address indexed owner, address payer);
 event AccountActivated(address indexed owner, address indexed payer);
@@ -336,6 +338,7 @@ Specific keeper implementations (cron schedule, chain and filter policy, alertin
 - On-chain EIP-712 auth.
 - Operator roles with restricted management capabilities.
 - Reliability layer (timelock-gated claimable xDAI stash for keeper upkeep).
+- Ownership transfer with explicit recipient acceptance.
 - **Implicit self-designation** for the single-key profile (owner == payer). Nice-to-have: short-circuit the designate + confirm handshake when `msg.sender` is both owner and payer of the account being opened. Dropped from this version to keep one uniform auth path; can be layered on later without touching any existing invariant.
 
 ## 14. Postage constraints

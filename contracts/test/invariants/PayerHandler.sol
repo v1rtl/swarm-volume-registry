@@ -174,16 +174,6 @@ contract PayerHandler is Test {
         vm.roll(block.number + (uint256(n) % 16) + 1);
     }
 
-    function transferOwnership(uint8 volIdx, uint8 newOwnerIdx) external {
-        if (createdVolumeIds.length == 0) return;
-        bytes32 id = createdVolumeIds[uint256(volIdx) % createdVolumeIds.length];
-        VolumeRegistry.VolumeView memory v = registry.getVolume(id);
-        if (v.status != 1) return;
-        address newOwner = owners[newOwnerIdx % 3];
-        vm.prank(v.owner);
-        try registry.transferVolumeOwnership(id, newOwner) {} catch {}
-    }
-
     function deleteVolume(uint8 volIdx) external {
         if (createdVolumeIds.length == 0) return;
         bytes32 id = createdVolumeIds[uint256(volIdx) % createdVolumeIds.length];
