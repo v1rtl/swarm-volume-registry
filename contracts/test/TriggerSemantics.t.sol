@@ -240,7 +240,9 @@ contract TriggerSemanticsTest is RegistryFixture {
         _activateAccount(OWNER, PAYER, _expectedCreateCharge(DEFAULT_DEPTH) * 10);
         bytes32 id1 = _createDefaultVolume(OWNER, CHUNK_SIGNER);
         bytes32 id2 = _createDefaultVolume(OWNER, CHUNK_SIGNER);
-        bytes32 id3 = _createDefaultVolume(OWNER, CHUNK_SIGNER);
+
+        _activateAccount(OWNER_B, PAYER2, _expectedCreateCharge(DEFAULT_DEPTH) * 10);
+        bytes32 id3 = _createDefaultVolume(OWNER_B, CHUNK_SIGNER);
 
         // Retire id2 via deleteVolume.
         vm.prank(OWNER);
@@ -248,13 +250,9 @@ contract TriggerSemanticsTest is RegistryFixture {
 
         _roll(3);
 
-        // Create a separate owner/payer for id3 so we can revoke it without
-        // affecting id1.
-        // Re-use: give OWNER a second payer — no, easier: transfer id3 to a
-        // fresh owner whose account we revoke.
-        vm.prank(OWNER);
-        registry.transferVolumeOwnership(id3, OWNER_B);
-        // OWNER_B has no active account → NoAuth skip on trigger.
+        // Revoke id3's separate owner/payer pair without affecting id1.
+        vm.prank(OWNER_B);
+        registry.revoke(OWNER_B);
 
         bytes32[] memory ids = new bytes32[](3);
         ids[0] = id1;

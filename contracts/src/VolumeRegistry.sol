@@ -82,7 +82,7 @@ contract VolumeRegistry {
     // ---------------------------------------------------------------------
 
     struct Volume {
-        address owner;
+        address owner; // fixed at create; v2 has no ownership-transfer path
         address chunkSigner;
         uint64 createdAt;
         uint64 ttlExpiry; // 0 = no expiry
@@ -139,10 +139,6 @@ contract VolumeRegistry {
         uint64 ttlExpiry
     );
     event VolumeRetired(bytes32 indexed volumeId, uint8 reason);
-    event VolumeOwnershipTransferred(
-        bytes32 indexed volumeId, address indexed from, address indexed to
-    );
-
     event PayerDesignated(address indexed owner, address payer);
     event AccountActivated(address indexed owner, address indexed payer);
     event AccountRevoked(address indexed owner, address indexed payer, address revoker);
@@ -272,16 +268,6 @@ contract VolumeRegistry {
         if (v.owner != msg.sender) revert NotVolumeOwner();
         if (v.status != STATUS_ACTIVE) revert VolumeNotActive();
         _retire(volumeId, REASON_OWNER_DELETED);
-    }
-
-    function transferVolumeOwnership(bytes32 volumeId, address newOwner) external {
-        Volume storage v = _volumes[volumeId];
-        if (v.owner != msg.sender) revert NotVolumeOwner();
-        if (v.status != STATUS_ACTIVE) revert VolumeNotActive();
-        if (newOwner == address(0)) revert ZeroAddress();
-        address prev = v.owner;
-        v.owner = newOwner;
-        emit VolumeOwnershipTransferred(volumeId, prev, newOwner);
     }
 
     // =====================================================================

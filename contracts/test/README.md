@@ -115,6 +115,7 @@ small happy-path subset plus `setUp` parity assertions.
 | **I7** — Removal finality | [`RetirementEdges.t.sol`](RetirementEdges.t.sol) (5 tests including `test_retired_noTransferFromPayer`) | — |
 | **I8** — Charge correctness | [`ChargeCorrectness.t.sol`](ChargeCorrectness.t.sol) (2 formula assertions) | [`invariants/NoOtherPathSpendsPayer.invariant_spentEqualsAllowedPerPayer`](invariants/NoOtherPathSpendsPayer.t.sol) |
 | **I9** — Revocation atomicity | [`RevocationAtomicity.t.sol`](RevocationAtomicity.t.sol) (1 test, 5-volume pair) | [`invariants/RevokedOwnerSpendsZero.invariant_spentMatchesAllowed`](invariants/RevokedOwnerSpendsZero.t.sol) |
+| **I10** — Owner immutability | [`VolumeLifecycle.test_ownerIsImmutable_legacyTransferSelectorReverts`](VolumeLifecycle.t.sol) | — (the owner field has no write path after creation) |
 
 ## Files
 
@@ -135,10 +136,10 @@ is constructed. Exposes canonical actors (`OWNER`, `OWNER_B`, `PAYER`,
 | File | Coverage |
 |---|---|
 | [`AccountStateMachine.t.sol`](AccountStateMachine.t.sol) | The owner→payer `designate` / `confirmAuth` / `revoke` handshake. Bilateral revoke authority, atomic re-confirm overwrite, `revoke` preserves `payer` storage but re-activation requires a fresh `designate` (matching the §6.2 diagram). |
-| [`VolumeLifecycle.t.sol`](VolumeLifecycle.t.sol) | `createVolume` happy path with exact charge; reverts on inactive account, insufficient balance, insufficient allowance, and on construction below the Postage floor. `deleteVolume` and `transferVolumeOwnership` including account-context-follows-new-owner. |
+| [`VolumeLifecycle.t.sol`](VolumeLifecycle.t.sol) | `createVolume` happy path with exact charge; reverts on inactive account, insufficient balance, insufficient allowance, and on construction below the Postage floor. `deleteVolume`, plus I10 coverage proving the legacy v1 transfer selector is absent and cannot redirect payer resolution. |
 | [`ActiveSetAndViews.t.sol`](ActiveSetAndViews.t.sol) | Swap-and-pop maintenance of `activeVolumeIds`, pagination, `getVolume` payer resolution before and after `revoke`. |
 | [`TriggerSemantics.t.sol`](TriggerSemantics.t.sol) | Full §8 check-order: happy topup, zero-deficit no-op, same-block idempotence, NoAuth / PaymentFailed skip paths (no retire), each retire edge in isolation, ordering tests pinning that every retire edge beats the auth check, batched-`trigger` try/catch isolation, `reap`. |
-| [`RetirementEdges.t.sol`](RetirementEdges.t.sol) | A retired volume cannot be triggered, deleted again, or transferred; is absent from `activeVolumeIds`; never causes a BZZ delta. Includes a `vm.store`-driven I2 defensive witness that forces `batches(id).owner != chunkSigner` and observes `REASON_BATCH_OWNER_MISMATCH`. |
+| [`RetirementEdges.t.sol`](RetirementEdges.t.sol) | A retired volume cannot be triggered or deleted again, is absent from `activeVolumeIds`, and never causes a BZZ delta. Includes a `vm.store`-driven I2 defensive witness that forces `batches(id).owner != chunkSigner` and observes `REASON_BATCH_OWNER_MISMATCH`. |
 | [`ChargeCorrectness.t.sol`](ChargeCorrectness.t.sol) | Asserts `createVolume` and `trigger` move exactly the formula-computed BZZ amount from the payer. The "no other path spends payer BZZ" half is in the invariant suite. |
 | [`PayerBoundedExposure.t.sol`](PayerBoundedExposure.t.sol) | Corner witnesses: revoked account does not drain; retired volume does not drain; after re-designating the payer, the old payer is never touched. |
 | [`SurvivalFloor.t.sol`](SurvivalFloor.t.sol) | Drives `PostageStamp.setPrice` at the worst-case `K_max`-per-`ROUND_LENGTH` schedule `PriceOracle` permits and measures observed batch-death blocks. Asserts `T ≥ ⌊f × graceBlocks⌋` with `f` computed in-test from the vendored oracle's `changeRate` / `priceBase` (Taylor expansion of `ln`), plus flat-price and falling-price control cases. |
@@ -149,7 +150,7 @@ is constructed. Exposes canonical actors (`OWNER`, `OWNER_B`, `PAYER`,
 
 | File | Role |
 |---|---|
-| [`invariants/PayerHandler.sol`](invariants/PayerHandler.sol) | Shared handler. 3 owners × 3 payers × 2 signers + 3 strangers, fixed set. Exposes `designate` / `confirm` / `revoke_` / `createVolume` / `triggerOne` / `triggerBatch` / `roll` / `transferOwnership` / `deleteVolume` / `strangerCalls` to the invariant runner. Maintains per-payer ghost sums `spentByPayer` (observed BZZ outflow) and `allowedByPayer` (formula-attributable charges observed via `Toppedup` and `createVolume` events). |
+| [`invariants/PayerHandler.sol`](invariants/PayerHandler.sol) | Shared handler. 3 owners × 3 payers × 2 signers + 3 strangers, fixed set. Exposes `designate` / `confirm` / `revoke_` / `createVolume` / `triggerOne` / `triggerBatch` / `roll` / `deleteVolume` / `strangerCalls` to the invariant runner. Maintains per-payer ghost sums `spentByPayer` (observed BZZ outflow) and `allowedByPayer` (formula-attributable charges observed via `Toppedup` and `createVolume` events). |
 | [`invariants/NoOtherPathSpendsPayer.t.sol`](invariants/NoOtherPathSpendsPayer.t.sol) | **I8** — `invariant_spentEqualsAllowedPerPayer`: for every payer, `spentByPayer == allowedByPayer` at every step. Any code path moving BZZ without emitting a corresponding `Toppedup` / `createVolume` breaks the equality. |
 | [`invariants/TransferOnlyIfGuarded.t.sol`](invariants/TransferOnlyIfGuarded.t.sol) | **I3** — `invariant_payerSpendNeverExceedsFormula`: `spentByPayer ≤ allowedByPayer`. Plus `invariant_volumeViewMatchesAccount`: `getVolume(id).{payer,accountActive}` agrees with `accounts[owner]` for every created volume. |
 | [`invariants/RevokedOwnerSpendsZero.t.sol`](invariants/RevokedOwnerSpendsZero.t.sol) | **I9** — `invariant_spentMatchesAllowed`: same equality as I8, scrutinised against the handler's randomised revoke sequence. Combined with the structural fact that `allowedByPayer` only rises on the guarded path, this rules out a revoked owner spending. |
@@ -211,9 +212,8 @@ Minor — flagged for honesty, not necessarily for fixing:
 
 - The constructor's zero-address checks (`postage == 0`, `bzz == 0`)
   have no witness.
-- `createVolume(chunkSigner = address(0))` and
-  `transferVolumeOwnership(newOwner = address(0))` revert with
-  `ZeroAddress` but neither path is exercised.
+- `createVolume(chunkSigner = address(0))` reverts with `ZeroAddress` but the path is not
+  exercised.
 - The error `DesignationClearedOnActivate` is declared on the contract
   but never thrown by any code path. Either the check it was meant to
   guard was inlined elsewhere or it is dead. Worth either removing the

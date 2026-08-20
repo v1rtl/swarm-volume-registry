@@ -4,8 +4,11 @@ pragma solidity ^0.8.19;
 import {RegistryFixture} from "./fixtures/RegistryFixture.sol";
 import {VolumeRegistry} from "../src/VolumeRegistry.sol";
 
-/// @notice Volume lifecycle (DESIGN §7.1, I1).
+/// @notice Volume lifecycle (DESIGN §7.1, I1, I10).
 contract VolumeLifecycleTest is RegistryFixture {
+    bytes4 internal constant LEGACY_TRANSFER_SELECTOR =
+        bytes4(keccak256("transferVolumeOwnership(bytes32,address)"));
+
     event VolumeCreated(
         bytes32 indexed volumeId,
         address indexed owner,
@@ -14,10 +17,6 @@ contract VolumeLifecycleTest is RegistryFixture {
         uint64 ttlExpiry
     );
     event VolumeRetired(bytes32 indexed volumeId, uint8 reason);
-    event VolumeOwnershipTransferred(
-        bytes32 indexed volumeId, address indexed from, address indexed to
-    );
-    event TopupSkipped(bytes32 indexed volumeId, uint8 reason);
 
     // --- createVolume ---------------------------------------------------
 
@@ -137,51 +136,32 @@ contract VolumeLifecycleTest is RegistryFixture {
         registry.deleteVolume(id);
     }
 
-    // --- transferVolumeOwnership ---------------------------------------
+    // --- owner immutability (I10) --------------------------------------
 
-    function test_transferOwnership_rotates() public {
-        _activateAccount(OWNER, PAYER, _expectedCreateCharge(DEFAULT_DEPTH) * 2);
+    function test_ownerIsImmutable_legacyTransferSelectorReverts() public {
+        uint256 charge = _expectedCreateCharge(DEFAULT_DEPTH);
+        _activateAccount(OWNER, PAYER, charge * 10);
+        _activateAccount(OWNER_B, PAYER2, charge * 10);
         bytes32 id = _createDefaultVolume(OWNER, CHUNK_SIGNER);
 
-        vm.expectEmit(true, true, true, true);
-        emit VolumeOwnershipTransferred(id, OWNER, OWNER_B);
+        // The v1 transfer selector is absent in v2. Even the current owner
+        // cannot attach the volume to another owner with an active payer.
         vm.prank(OWNER);
-        registry.transferVolumeOwnership(id, OWNER_B);
+        (bool ok,) =
+            address(registry).call(abi.encodeWithSelector(LEGACY_TRANSFER_SELECTOR, id, OWNER_B));
+        assertFalse(ok, "legacy ownership transfer unexpectedly succeeded");
+        assertEq(registry.getVolume(id).owner, OWNER, "volume owner changed");
 
-        assertEq(registry.getVolume(id).owner, OWNER_B);
-
-        // Old owner can no longer delete.
-        vm.prank(OWNER);
-        vm.expectRevert(VolumeRegistry.NotVolumeOwner.selector);
-        registry.deleteVolume(id);
-
-        // New owner can.
-        vm.prank(OWNER_B);
-        registry.deleteVolume(id);
-        assertEq(registry.getVolume(id).status, 2);
-    }
-
-    function test_transferOwnership_accountContextFollows() public {
-        // A has active account with PAYER; creates a volume.
-        _activateAccount(OWNER, PAYER, _expectedCreateCharge(DEFAULT_DEPTH) * 10);
-        bytes32 id = _createDefaultVolume(OWNER, CHUNK_SIGNER);
-
-        // Transfer to B who has no account at all.
-        vm.prank(OWNER);
-        registry.transferVolumeOwnership(id, OWNER_B);
-
-        // Advance a block so there is a nonzero deficit.
         _roll(5);
-
-        // Expect NoAuth skip — payer lookup now uses accounts[OWNER_B].
         uint256 payerBalBefore = bzz.balanceOf(PAYER);
-        vm.expectEmit(true, true, true, true);
-        emit TopupSkipped(id, registry.SKIP_NO_AUTH());
+        uint256 recipientPayerBalBefore = bzz.balanceOf(PAYER2);
         registry.trigger(id);
 
-        // Original payer untouched.
-        assertEq(bzz.balanceOf(PAYER), payerBalBefore);
-        // Volume still active — NoAuth never retires.
-        assertEq(registry.getVolume(id).status, 1);
+        assertLt(bzz.balanceOf(PAYER), payerBalBefore, "original payer was not charged");
+        assertEq(
+            bzz.balanceOf(PAYER2),
+            recipientPayerBalBefore,
+            "recipient payer was charged for an unsolicited volume"
+        );
     }
 }
