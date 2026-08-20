@@ -44,6 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: js
     steps:
       - uses: actions/checkout@v5
         with:

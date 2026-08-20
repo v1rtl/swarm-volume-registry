@@ -73,10 +73,11 @@ bound the value implies.
 
 ## Keeper package
 
-`packages/ethswarm-volume-keeper` (the keeper cycle) and `workers/gas-boy` (the
-reference Cloudflare Worker) form a Bun workspace rooted at the repo root.
+`js/packages/ethswarm-volume-keeper` (the keeper cycle) and `js/workers/gas-boy`
+(the reference Cloudflare Worker) form a Bun workspace rooted at `js/`.
 
 ```sh
+cd js
 bun install
 bun run typecheck
 bun test packages/
@@ -84,9 +85,10 @@ bun run build          # tsc → packages/ethswarm-volume-keeper/dist
 ```
 
 The worker imports the package's `dist/`, so its scripts build the package
-first. It needs no chain access to typecheck; `bun run dev` in `workers/gas-boy`
-starts `wrangler dev` against `.dev.vars` (see `.dev.vars.example`).
+first. It needs no chain access to typecheck; `bun run dev` in
+`js/workers/gas-boy` starts `wrangler dev` against `.dev.vars` (see
+`.dev.vars.example`).
 
 The package is deliberately free of transports, chain definitions, RPC
 endpoints, key handling and environment parsing — actions take a viem client
-the caller supplies. Those concerns belong in a bot, e.g. `workers/gas-boy`.
+the caller supplies. Those concerns belong in a bot, e.g. `js/workers/gas-boy`.
