@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Foundry](https://book.getfoundry.sh/) (`forge`, `cast`, `anvil`).
+- [Foundry](https://book.getfoundry.sh/) v1.7.1 (`forge`, `cast`, `anvil`).
 - Git submodules initialised:
   ```sh
   git submodule update --init --recursive
@@ -44,18 +44,26 @@ forge fmt --check
 
 ## Deploy
 
-`DeployVolumeRegistry.s.sol` reads every parameter from the environment — nothing is hardcoded, because `PostageStamp` is expected to be redeployed across chains and versions and this repo must track each new deployment without a code change.
+Select a named constructor-input profile from
+[`contracts/deployments.toml`](./contracts/deployments.toml). Profiles are independent
+of chain IDs, so the file can hold multiple relevant `PostageStamp` deployments on the
+same chain. The launcher verifies that the selected profile's chain ID matches the RPC.
 
 ```sh
-POSTAGE_STAMP=0x... \
-BZZ=0x... \
-GRACE_BLOCKS=17280 \
-PRIVATE_KEY=0x... \
-forge script script/DeployVolumeRegistry.s.sol \
-    --rpc-url $RPC_URL --broadcast
+python3 script/deploy.py sepolia-postage-v0.9.4 \
+    --rpc-url "$RPC_URL" \
+    --account swarm-volume-registry-deployer \
+    --broadcast
 ```
 
-`GRACE_BLOCKS` must be ≥ `PostageStamp.minimumValidityBlocks()` on the target chain or the constructor reverts. See [`docs/DESIGN.md`](./docs/DESIGN.md) §10 for semantics and §10.1 for the survival bound the value implies.
+The account must already exist in Foundry's encrypted keystore. Foundry 1.7.1 or newer
+automatically uses the single named account as the script sender; the launcher rejects
+older versions that require a duplicate `--sender` argument.
+
+The configured `grace_blocks` must be at least
+`PostageStamp.minimumValidityBlocks()` on the target chain or the constructor reverts.
+See [`docs/DESIGN.md`](./docs/DESIGN.md) §10 for semantics and §10.1 for the survival
+bound the value implies.
 
 ## Dependencies
 
