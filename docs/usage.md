@@ -2,6 +2,14 @@
 
 A reference for integrating with a deployed `VolumeRegistry` contract. Aimed at LLM agents writing integrations and at humans driving the contract from `cast` or ad-hoc scripts. Authoritative architecture lives in [`DESIGN.md`](./DESIGN.md); this file documents the *public-facing* behavior only.
 
+> [!WARNING]
+> The deployed v1 contracts are early-alpha and immutable. Their
+> `transferVolumeOwnership` function does not require acceptance by the recipient. If
+> the recipient already has an active account, the next keeper trigger can charge that
+> account's payer for the transferred volume. Keep allowances bounded, use ownership
+> transfer only by prior agreement, and see [§10](#10-revocation) for the emergency
+> response to an unsolicited transfer.
+
 ## Contents
 
 1. [What this is](#1-what-this-is)
@@ -189,6 +197,12 @@ function transferVolumeOwnership(bytes32 volumeId, address newOwner) external;
 ```
 Owner-only. The volume's payer lookup switches to `accounts[newOwner]`. Until the new owner has an active account, `trigger` calls emit `TopupSkipped(NoAuth)` and do not spend BZZ. Emits `VolumeOwnershipTransferred`.
 
+**v1 warning:** the recipient does not accept this transfer. If `newOwner` already has
+an active account, a keeper can immediately pull the next topup from that account's
+payer. Only transfer by prior agreement. A recipient of an unsolicited volume should
+delete that volume or revoke and permanently sever their payer authorization as
+described in §10.
+
 ```solidity
 function designateFundingWallet(address payer) external;  // 0 to clear
 ```
@@ -214,8 +228,14 @@ function trigger(bytes32[] calldata volumeIds) external;
 function reap(bytes32 volumeId) external;
 ```
 - `trigger(id)` — top up one volume. See §8 for semantics.
-- `trigger(ids[])` — loop with per-item `try/catch`; one revert never aborts the batch. Preferred for keepers.
-- `reap(id)` — detach a volume that has already transitioned to a retirement condition but hasn't yet been observed by a trigger. Usually unnecessary.
+- `trigger(ids[])` — loop with per-item `try/catch`; one revert never aborts the batch.
+  In v1 the catch also absorbs an inner out-of-gas failure, so a successful receipt does
+  not prove every requested id was processed. Keep batches conservatively sized and
+  verify per-volume outcomes; estimating a single-id trigger and extrapolating is safer
+  than relying on `eth_estimateGas` for the batched entry point.
+- `reap(id)` — retire an `Active` volume if, and only if, its TTL has expired. It is an
+  idempotent no-op for inactive volumes and for active volumes whose TTL has not passed.
+  It does not inspect Postage batch death, owner, or depth.
 
 ### 6.4 Views
 
@@ -228,7 +248,7 @@ struct VolumeView {
     uint64  createdAt;
     uint64  ttlExpiry;
     uint8   depth;
-    uint8   status;         // 0 = Active, 1 = Retired
+    uint8   status;         // 1 = Active, 2 = Retired
     bool    accountActive;
 }
 
@@ -245,22 +265,24 @@ function getAccount(address owner) external view returns (Account memory);
 | Event | Emitted when |
 |---|---|
 | `VolumeCreated(bytes32 indexed volumeId, address indexed owner, address chunkSigner, uint8 depth, uint64 ttlExpiry)` | Owner created a volume. First indexed topic is the volumeId. |
-| `VolumeRetired(bytes32 indexed volumeId, uint8 reason)` | Volume transitioned to `Retired`. `reason` ∈ `{OwnerDeleted=0, VolumeExpired=1, BatchDied=2, DepthChanged=3}`. |
+| `VolumeRetired(bytes32 indexed volumeId, uint8 reason)` | Volume transitioned to `Retired`. `reason` ∈ `{OwnerDeleted=1, VolumeExpired=2, BatchDied=3, DepthChanged=4, BatchOwnerMismatch=5}`. |
 | `VolumeOwnershipTransferred(bytes32 indexed volumeId, address indexed from, address indexed to)` | `transferVolumeOwnership` succeeded. |
 | `PayerDesignated(address indexed owner, address payer)` | Owner called `designateFundingWallet`. |
 | `AccountActivated(address indexed owner, address indexed payer)` | Payer confirmed; account is now `Active`. |
 | `AccountRevoked(address indexed owner, address indexed payer, address revoker)` | Either party called `revoke`. |
 | `Toppedup(bytes32 indexed volumeId, uint256 amount, uint256 newNormalisedBalance)` | A trigger pulled BZZ from the payer and forwarded to Postage. |
-| `TopupSkipped(bytes32 indexed volumeId, uint8 reason)` | A trigger ran but moved no BZZ. `reason` ∈ `{NoAuth=0, PaymentFailed=1}`. Volume remains `Active`. |
+| `TopupSkipped(bytes32 indexed volumeId, uint8 reason)` | A trigger ran but moved no BZZ. `reason` ∈ `{NoAuth=1, PaymentFailed=2}`. Volume remains `Active`. |
 
 ## 8. How topups work
 
 On each `trigger(volumeId)` the registry:
 
-1. Checks the volume is still `Active` and its Postage batch still exists at the recorded depth.
-2. Computes `target = graceBlocks × currentPrice` (per chunk).
-3. Reads the batch's current `normalisedBalance`. If it is already ≥ `target`, returns as a no-op.
-4. Otherwise, pulls `deficit × (1 << depth)` BZZ from the payer via `transferFrom` and calls `PostageStamp.topUp(volumeId, deficit)`.
+1. Checks the volume is still `Active` and its Postage batch still exists.
+2. Retires the volume if the Postage batch owner no longer matches the recorded chunk
+   signer, its depth changed, or its TTL expired.
+3. Computes `target = graceBlocks × currentPrice` (per chunk).
+4. Reads the batch's current `normalisedBalance`. If it is already ≥ `target`, returns as a no-op.
+5. Otherwise, pulls `deficit × (1 << depth)` BZZ from the payer via `transferFrom` and calls `PostageStamp.topUp(volumeId, deficit)`.
 
 This makes triggers **idempotent within a block at constant price**: calling `trigger(id)` twice in a row after a successful topup moves no BZZ on the second call. The same property holds any time the batch is already at or above target.
 
@@ -276,8 +298,9 @@ Retirement is terminal. A retired volume cannot be revived, cannot be triggered,
 |---|---|---|
 | `OwnerDeleted` | Owner called `deleteVolume`. | Direct. |
 | `VolumeExpired` | `ttlExpiry != 0 && now ≥ ttlExpiry`. | Next `trigger` or `reap`. |
-| `BatchDied` | Postage reports the batch as expired or nonexistent. | Next `trigger` or `reap`. |
-| `DepthChanged` | The chunk signer called `PostageStamp.increaseDepth` directly, diverging the batch from the volume's recorded depth. | Next `trigger` or `reap`. |
+| `BatchDied` | Postage reports the batch as expired or nonexistent. | Next `trigger`. |
+| `DepthChanged` | The chunk signer called `PostageStamp.increaseDepth` directly, diverging the batch from the volume's recorded depth. | Next `trigger`. |
+| `BatchOwnerMismatch` | Postage reports a batch owner different from the recorded chunk signer. This is a defensive check for upstream changes. | Next `trigger`. |
 
 The correct response to any retirement is to create a new volume. Depth changes in particular are not a v1-supported operation — create a new, larger volume and migrate off-chain.
 
@@ -292,7 +315,16 @@ The correct response to any retirement is to create a new volume. Depth changes 
 
 If you want the batches dead sooner, `deleteVolume` each one after revoking.
 
-Re-activating the same (owner, payer) pair requires a fresh `confirmAuth(owner)` call from the payer. Re-designation is only needed if `designated[owner]` was cleared in the interim.
+Re-activating the same (owner, payer) pair requires a fresh `confirmAuth(owner)` call
+from the payer. In v1, `revoke` does **not** clear `designated[owner]`, so the designated
+payer can re-activate the account without another owner transaction. An owner who wants
+permanent severance must both call `designateFundingWallet(address(0))` and revoke the
+account; clearing the designation alone does not deactivate it. The payer should clear
+the registry's BZZ allowance as a separate defense in depth.
+
+For an unsolicited ownership transfer, the new owner can call `deleteVolume` for that
+volume. For an immediate pair-wide stop, call `revoke(owner)` and
+`designateFundingWallet(address(0))`, and have the payer clear its allowance.
 
 ## 11. Survival guarantee
 
@@ -303,6 +335,13 @@ f × graceBlocks  blocks  before its batch dies
 ```
 
 where `f ≈ 0.9567` for `graceBlocks = 17280` on Gnosis Chain. In wall-clock terms at 5-second blocks: promised runway is ~24 h, worst-case runway is ~22.95 h. Under flat or falling prices the runway meets or exceeds 24 h.
+
+This bound assumes the configured PriceOracle rate ceiling is respected and Postage
+remains available. An account with `PRICE_ORACLE_ROLE` can set a price outside that
+rate-limited path, and a paused Postage contract prevents topups. In addition,
+`PostageStamp.minimumValidityBlocks()` is mutable: if its administrator raises that
+floor above this registry's immutable `graceBlocks`, v1 topups revert until users move
+to a compatible registry deployment.
 
 See [`DESIGN.md`](./DESIGN.md) §10.1 for derivation.
 

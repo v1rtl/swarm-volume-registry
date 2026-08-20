@@ -75,6 +75,14 @@ uint256   nextNonce;                            // monotonic counter passed to P
 - **Owner compromise.** While the account is active, the attacker can create arbitrary high-depth volumes and force topups on existing ones. The effective drain ceiling is whatever ERC20 allowance the payer has granted the registry — **this contract adds no further aggregate cap**. I8 is a per-call charge-correctness property, not an attacker-facing bound. Mitigations are detection + I9 (a single `revoke(owner)` disables the entire (owner, payer) pair in one tx) and payer hygiene (bounded periodic approvals rather than `approve(max_uint256)`).
 - **Payer compromise.** Outside the registry's protection boundary; if the payer's key is taken, funds are already under attacker control.
 
+**Known v1 transfer exposure.** `transferVolumeOwnership` is unilateral. An owner can
+transfer a volume to an address that did not agree to receive it; from that point,
+triggers resolve the recipient's account and can charge its payer if that account is
+active. The allowance still bounds aggregate exposure, and the recipient can delete the
+volume or revoke its account, but an automated keeper can charge the payer before the
+recipient reacts. v1 users must transfer only by prior agreement and keep payer
+allowances bounded.
+
 The common profile owner == chunk-signer inherits the signer's threat class: the owner key is then also continuously hot. Users who want strong key isolation should keep owner and chunk-signer separate.
 
 Invariants:
@@ -111,19 +119,27 @@ Entry edges to `Retired`:
 
 ### 6.2 Account
 
+Designation and activation are separate pieces of state in v1:
+
 ```
-        (designateFundingWallet)          (confirmAuth)
-    ∅ ─────────────────────────▶ Designated ──────────────▶ Active
-    ▲                                                         │
-    │                                                         │
-    └── revoke (by owner or payer) ◀─────────────────────────┘
+designation:  None ── designate(payer) ──▶ Payer designated
+               ▲                              │
+               └──── designate(0) ────────────┘
+
+account:      Inactive ── confirmAuth(owner) ─▶ Active
+                ▲                                  │
+                └──── revoke(owner) ───────────────┘
 ```
+
+`confirmAuth` requires the caller to be the currently designated payer. Clearing the
+designation does not deactivate an already-active account, and revoking the account
+does not clear its designation.
 
 `designateFundingWallet(p)` by owner sets `designated[owner] = p`. Calling with `p = address(0)` clears designation.
 
 `confirmAuth(owner)` by payer requires `designated[owner] == msg.sender`, then sets `accounts[owner] = {payer: msg.sender, active: true}`. Atomic overwrite of any prior account.
 
-`revoke(owner)` callable by `msg.sender == owner || msg.sender == accounts[owner].payer`. Sets `accounts[owner].active = false`. Does **not** retire any volumes; volumes coast on remaining batch balance until `BatchDied`.
+`revoke(owner)` callable by `msg.sender == owner || msg.sender == accounts[owner].payer`. Sets `accounts[owner].active = false`. It does not clear `designated[owner]`, so the designated payer can call `confirmAuth(owner)` again without a fresh owner transaction. An owner who wants permanent severance must also call `designateFundingWallet(address(0))`. Revocation does **not** retire any volumes; volumes coast on remaining batch balance until `BatchDied`.
 
 ## 7. API
 
@@ -149,7 +165,7 @@ function designateFundingWallet(address payer) external;  // payer = 0 to clear
 
 - `createVolume` requires `accounts[msg.sender].active == true`. Initial per-chunk balance is not user-chosen: the registry computes `perChunk = currentPrice × graceBlocks` so the volume is born with exactly the runway described in §10.1. Total BZZ charge `= perChunk × (1 << depth)` is pulled from `accounts[msg.sender].payer` via ERC20 `transferFrom` (payer must have approved at least this amount). Registry then calls `PostageStamp.createBatch(chunkSigner, perChunk, depth, bucketDepth, nonce, immutableBatch)`, passing the internally-managed `nextNonce` (§4) and incrementing. Inserts into `activeVolumeIds`. The returned `volumeId` equals Postage's `batchId = keccak256(abi.encode(address(this), nonce))`; callers discover it via the return value or the `VolumeCreated` event. Postage's `minimumInitialBalancePerChunk` floor is guaranteed by the constructor check in §10.
 - `deleteVolume` requires `msg.sender == volume.owner && volume.status == Active`. Transitions to `Retired.OwnerDeleted`, swap-and-pop from active list. No on-chain refund (Postage has no reclaim).
-- `transferVolumeOwnership` requires `msg.sender == volume.owner`. Account context follows the new owner — volume's payer lookup will now use `accounts[newOwner]`. Documented: new owner must have an active account or topups will skip.
+- `transferVolumeOwnership` requires `msg.sender == volume.owner`. Account context follows the new owner — volume's payer lookup will now use `accounts[newOwner]`. The recipient does not accept the transfer: if the new owner already has an active account, its payer can be charged by the next trigger. This is a known v1 exposure; transfers must be agreed off-chain before submission.
 - `designateFundingWallet` is unilateral owner action. Does not require any account state.
 
 ### 7.2 Payer API
@@ -173,7 +189,7 @@ function reap(bytes32 volumeId) external;
 
 - `trigger(id)` — see §8.
 - `trigger(ids[])` — loops with per-item `try/catch`; one failure never aborts the batch.
-- `reap(id)` — detaches `Retired` volumes that were retired in a prior trigger; mostly unnecessary since trigger does its own reaping, but exposed for manual cleanup.
+- `reap(id)` — retires an `Active` volume whose TTL has passed and otherwise does nothing. It does not inspect Postage batch death, owner, or depth; `trigger` handles those edges.
 
 ### 7.4 Views
 
@@ -208,15 +224,16 @@ function getAccount(address owner) external view returns (Account memory);
 
 1. Load `v = volumes[volumeId]`. Revert if `v.status != Active`.
 2. Load Postage batch `b = PostageStamp.batches[volumeId]`. If `b` does not exist or is expired → retire `BatchDied`, emit `VolumeRetired`, return.
-3. If `b.depth != v.depth` → retire `DepthChanged`, emit, return.
-4. If `v.ttlExpiry != 0 && block.timestamp >= v.ttlExpiry` → retire `VolumeExpired`, emit, return.
-5. `acct = accounts[v.owner]`. If `!acct.active` → emit `TopupSkipped(NoAuth)`, return. **No retire.**
-6. Compute `target = currentPrice × graceBlocks`.
+3. If `b.owner != v.chunkSigner` → retire `BatchOwnerMismatch`, emit, return.
+4. If `b.depth != v.depth` → retire `DepthChanged`, emit, return.
+5. If `v.ttlExpiry != 0 && block.timestamp >= v.ttlExpiry` → retire `VolumeExpired`, emit, return.
+6. `acct = accounts[v.owner]`. If `!acct.active` → emit `TopupSkipped(NoAuth)`, return. **No retire.**
+7. Compute `target = currentPrice × graceBlocks`.
    Compute `deficit = target > b.normalisedBalance ? target - b.normalisedBalance : 0`.
    If `deficit == 0` → return (idempotent no-op).
-7. `amount = deficit × (1 << v.depth)`.
+8. `amount = deficit × (1 << v.depth)`.
    Try `BZZ.transferFrom(acct.payer, this, amount)`. On revert (insufficient balance, revoked approval, spending-limit hit, Safe module config) → emit `TopupSkipped(PaymentFailed)`, return. **No retire.**
-8. `BZZ.approve(postage, amount); PostageStamp.topUp(volumeId, deficit);` emit `Toppedup`.
+9. `BZZ.approve(postage, amount); PostageStamp.topUp(volumeId, deficit);` emit `Toppedup`.
 
 The check order matters: batch/depth/TTL retire-edges are evaluated before auth/payment, so a lapsed auth does not mask an expired batch.
 
@@ -249,6 +266,11 @@ Set once at construction; all three are immutable thereafter:
 - `graceBlocks ≥ PostageStamp(postage).minimumValidityBlocks()`. Otherwise `createBatch` would revert with `InsufficientBalance` on every `createVolume` (Postage's own floor is `minimumValidityBlocks × lastPrice` per chunk). Verified at deploy; contract refuses to instantiate if violated.
 - `postage` and `bzz` are non-zero.
 
+The first check is deployment-time only. `PostageStamp.minimumValidityBlocks()` is
+mutable while this registry's `graceBlocks` is immutable. If the Postage administrator
+later raises the floor above `graceBlocks`, v1 topups revert; a new compatible registry
+deployment is required.
+
 No admin role, no upgradeability. Fresh deploy per chain. Target chain: **Gnosis Chain only**.
 
 ### 10.1 Deviation bound for `graceBlocks = 17280`
@@ -256,6 +278,11 @@ No admin role, no upgradeability. Fresh deploy per chain. Target chain: **Gnosis
 `graceBlocks` is the runway, in Postage per-chunk-balance-at-current-price units, that the registry charges up front and tops up to. If price stayed flat, a freshly-topped-up volume would survive exactly `graceBlocks` more blocks before its batch dies. Under a rising price, the realised runway is shorter. This section bounds the worst-case shortfall.
 
 **Guarantee we document to users.** If no keeper ever calls `trigger` again after a top-up, the batch dies at block `t0 + T`, where `T / graceBlocks ≥ f` in the worst case permitted by Swarm's `PriceOracle`.
+
+This is conditional on the PriceOracle's rate-limited adjustment path and Postage
+availability. A holder of `PRICE_ORACLE_ROLE` can call `setPrice` directly with an
+arbitrary value, bypassing the derived rate ceiling, and a paused Postage contract
+prevents topups while volumes continue consuming their existing balances.
 
 **Derivation.** At top-up, per-chunk balance is `graceBlocks × p0`, where `p0` is the oracle price at that moment. Drain to time `T` is `∫_0^T p(s) ds`. Swarm's `PriceOracle` (`ethersphere/storage-incentives/src/PriceOracle.sol`) raises price by at most factor `K_max` per round of `U` blocks; skipped rounds apply `K_max` retroactively to each skipped round, so the compound ceiling is genuine. Bounding the drain by a continuous exponential `p(t) ≤ p0 × e^(λt)` with `λ = ln(K_max)/U`:
 
@@ -297,7 +324,7 @@ Specific keeper implementations (cron schedule, chain and filter policy, alertin
 
 - Account lifecycle: `designate ↔ confirm`; `owner-revoke ↔ payer-revoke`.
 - Volume lifecycle: `create ↔ delete (OwnerDeleted)`.
-- Retirement edges: four parallel reasons, one terminal state.
+- Retirement edges: five parallel reasons, one terminal state.
 - Registry / Paymaster: identical-signature write paths for state, read paths for views.
 
 ## 13. Deferred
