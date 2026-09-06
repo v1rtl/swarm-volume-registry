@@ -5,7 +5,7 @@ import { registryAbi } from "../abi.js";
 
 export type TriggerParameters = {
   registry: Address;
-  volumeIds: readonly Hex[];
+  volumeId: Hex;
   /** Defaults to the client's account. */
   account?: Account | Address;
   chain?: Chain | null;
@@ -13,6 +13,8 @@ export type TriggerParameters = {
   gas?: bigint;
   /** Headroom over the estimate. Default 1.2 — see below for why it matters. */
   gasMultiplier?: number;
+  /** Lower bound on the scaled estimate. Default 300_000 — see below. */
+  gasFloor?: bigint;
 };
 
 export type TriggerReturnType = Hex;
@@ -21,30 +23,35 @@ const scaleGas = (gas: bigint, multiplier: number): bigint =>
   (gas * BigInt(Math.round(multiplier * 100))) / 100n;
 
 /**
- * Top up (or retire) a batch of volumes.
+ * Top up (or retire) one volume.
  *
  * Idempotent: the contract tops up to a target, so a second call in the same
  * block transfers nothing.
  *
- * **Gas matters more here than usual.** `trigger(bytes32[])` runs each id as
- * `try this._triggerExt(id) {} catch {}`, and an inner call only receives
- * 63/64 of the remaining gas. Run short and the inner call runs out, the
- * `catch` swallows it, the loop moves on, and the transaction *succeeds* —
- * having topped up nothing. An under-estimate fails silently rather than
- * reverting, which is why the estimate is scaled rather than used raw.
+ * One volume per call is the v2 keeper convention (docs/KEEPERS.md). The
+ * batched `trigger(bytes32[])` swallows per-item reverts, which makes a
+ * gas-starved volume indistinguishable from a healthy one; here the volume owns
+ * the whole transaction, so it reverts when it fails and its receipt describes
+ * only itself.
  *
- * That is also why there is no cap: a ceiling below what the batch needs
- * doesn't fail loudly, it silently drops volumes. Bound the work with
- * `maxIdsPerTx` instead, or pass `gas` if you want an exact limit. Unused gas
- * is refunded, so an over-estimate costs nothing.
+ * **The gas limit still needs headroom, for a different reason than batching
+ * did.** `_triggerOne` branches on state read at execution time: a volume that
+ * estimates as a ~28k no-op today needs the full `transferFrom` → `approve` →
+ * `topUp` path — several times that — if the postage price moves, or its batch
+ * is consumed further, between estimation and inclusion. An estimate taken on
+ * the cheap branch and spent on the expensive one is an out-of-gas revert. So
+ * the estimate is scaled by `gasMultiplier` *and* floored at `gasFloor`, which
+ * covers the top-up path outright. Unused gas is refunded, so the floor costs
+ * nothing on the no-op path it usually lands on.
  *
- * A mined transaction therefore says nothing on its own about what was
- * funded — decode the receipt with {@link decodeCycleEvents} to find out.
+ * Estimation doubles as the pre-flight check: `_triggerOne` reverts
+ * `VolumeNotActive` on a volume retired since enumeration, and that revert
+ * surfaces here — named, before a transaction is paid for.
  *
  * @example
  * const hash = await trigger(walletClient, {
  *   registry: '0x…',
- *   volumeIds: plan.volumeIds,
+ *   volumeId: '0x…',
  * })
  */
 export async function trigger<
@@ -56,34 +63,34 @@ export async function trigger<
 ): Promise<TriggerReturnType> {
   const {
     registry,
-    volumeIds,
+    volumeId,
     account = client.account,
     chain = client.chain,
     gasMultiplier = 1.2,
+    gasFloor = 300_000n,
   } = parameters;
 
   const call = {
     address: registry,
     abi: registryAbi,
     functionName: "trigger",
-    args: [volumeIds],
+    args: [volumeId],
     account,
     chain,
   } as const;
 
-  // No simulate pass: the contract's per-item try/catch means `trigger` has no
-  // top-level revert to catch, so an eth_call would only cost a round trip.
-  // Estimation surfaces a bad address or ABI just as well.
-  const gas =
-    parameters.gas ??
-    scaleGas(
-      await getAction(
-        client,
-        estimateContractGas,
-        "estimateContractGas",
-      )(call as never),
-      gasMultiplier,
-    );
+  // No separate simulate pass: estimation runs the same call and reverts the
+  // same way, so an eth_call first would only cost a round trip.
+  let gas = parameters.gas;
+  if (gas === undefined) {
+    const estimate = await getAction(
+      client,
+      estimateContractGas,
+      "estimateContractGas",
+    )(call as never);
+    gas = scaleGas(estimate, gasMultiplier);
+    if (gas < gasFloor) gas = gasFloor;
+  }
 
   return getAction(client, writeContract, "writeContract")({ ...call, gas } as never);
 }

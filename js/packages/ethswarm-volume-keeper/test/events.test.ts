@@ -9,7 +9,7 @@ import {
   type Log,
 } from "viem";
 import { registryAbi } from "../src/abi.js";
-import { decodeCycleEvents } from "../src/events.js";
+import { decodeCycleEvents, summarizeVolume } from "../src/events.js";
 import { REGISTRY, volumeId } from "./mock-chain.js";
 
 const OTHER_CONTRACT = "0x9999999999999999999999999999999999999999" as Address;
@@ -123,5 +123,56 @@ describe("decodeCycleEvents", () => {
       retired: [],
       topupSkipped: [],
     });
+  });
+});
+
+const decode = (logs: Log[]) => decodeCycleEvents(logs, REGISTRY);
+
+describe("summarizeVolume", () => {
+  // The whole reason a v2 keeper spends a transaction per volume: an empty
+  // receipt is an answer, not a gap. Batched, this was indistinguishable from
+  // an inner call that ran out of gas and got swallowed.
+  test("no events means the volume needed nothing", () => {
+    expect(summarizeVolume(decode([]), volumeId(1))).toEqual({ outcome: "noop" });
+  });
+
+  test("a top-up carries its amount", () => {
+    const summary = summarizeVolume(
+      decode([log("Toppedup", volumeId(1), topup(5000n))]),
+      volumeId(1),
+    );
+    expect(summary).toEqual({ outcome: "toppedUp", amount: 5000n });
+  });
+
+  test("a retirement carries its named reason", () => {
+    const summary = summarizeVolume(
+      decode([log("VolumeRetired", volumeId(1), uint8(3))]),
+      volumeId(1),
+    );
+    expect(summary).toEqual({ outcome: "retired", reason: "BatchDied" });
+  });
+
+  test("a skip carries its named reason", () => {
+    const summary = summarizeVolume(
+      decode([log("TopupSkipped", volumeId(1), uint8(2))]),
+      volumeId(1),
+    );
+    expect(summary).toEqual({ outcome: "topupSkipped", reason: "PaymentFailed" });
+  });
+
+  test("another volume's event is never attributed to this one", () => {
+    const summary = summarizeVolume(
+      decode([log("Toppedup", volumeId(2), topup(5000n))]),
+      volumeId(1),
+    );
+    expect(summary).toEqual({ outcome: "noop" });
+  });
+
+  test("the volume id is matched case-insensitively", () => {
+    const summary = summarizeVolume(
+      decode([log("Toppedup", volumeId(0xab), topup(1n))]),
+      volumeId(0xab).toUpperCase().replace("0X", "0x") as Hex,
+    );
+    expect(summary.outcome).toBe("toppedUp");
   });
 });

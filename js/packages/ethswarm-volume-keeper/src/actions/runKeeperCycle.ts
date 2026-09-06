@@ -7,9 +7,8 @@ import {
 } from "viem/actions";
 import { getAction } from "viem/utils";
 import { VOLUME_STATUS, registryAbi } from "../abi.js";
-import { decodeCycleEvents } from "../events.js";
-import { chunk } from "../utils.js";
-import type { KeeperMode, TxResult, VolumeOutcome } from "../types.js";
+import { decodeCycleEvents, summarizeVolume } from "../events.js";
+import type { KeeperMode, VolumeOutcome, VolumeResult } from "../types.js";
 import { collectActiveVolumes } from "./collectActiveVolumes.js";
 import { trigger } from "./trigger.js";
 
@@ -19,12 +18,12 @@ export type RunKeeperCycleParameters = {
   mode?: KeeperMode;
   /** Volumes per page in `all` mode. Default 100. */
   pageSize?: number;
-  /** Volume ids per transaction. Default 50. */
-  maxIdsPerTx?: number;
-  /** Transactions per cycle. Default 8; the rest defers to the next cycle. */
-  maxTxPerCycle?: number;
+  /** Volumes attempted per cycle. Default 50; the rest defers to the next. */
+  maxVolumesPerCycle?: number;
   /** Headroom over the gas estimate. Default 1.2 — see {@link trigger}. */
   gasMultiplier?: number;
+  /** Lower bound on the scaled estimate. Default 300_000 — see {@link trigger}. */
+  gasFloor?: bigint;
   /** Default 1. */
   confirmations?: number;
   /** Per-transaction receipt wait, in ms. Default 60_000. */
@@ -36,21 +35,26 @@ export type RunKeeperCycleParameters = {
 };
 
 export type RunKeeperCycleReturnType = {
-  /** False if anything failed. The cycle still ran to completion. */
+  /** False if any volume's transaction did not confirm. The cycle still ran on. */
   ok: boolean;
   mode: KeeperMode["type"];
   /** The block the volume list was read at. */
   blockNumber?: bigint;
-  /** Active volumes found. `warnings` says so if not all of them were sent. */
+  /** Active volumes found. `warnings` says so if not all of them were attempted. */
   volumeCount: number;
   /** Set when the cycle deliberately did no work. */
   skipped?: string;
-  txs: TxResult[];
+  /** One entry per volume attempted, in order. */
+  volumes: VolumeResult[];
   /** Decoded from receipts — what actually happened on chain. */
   toppedUp: Array<{ volumeId: Hex; amount: bigint }>;
   retired: VolumeOutcome[];
   /** Volumes the contract declined to fund, with its own reason. */
   topupSkipped: VolumeOutcome[];
+  /** Volumes that needed nothing. The healthy majority. */
+  noop: Hex[];
+  /** Volumes whose transaction reverted, was never mined, or never confirmed. */
+  failed: Hex[];
   /** `selected` mode: requested ids that are not Active volumes. */
   notActive: Hex[];
   warnings: string[];
@@ -62,18 +66,32 @@ const message = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
 /**
- * One full keeper cycle: read the registry's active volumes and trigger them.
+ * One full keeper cycle: read the registry's active volumes and trigger each
+ * one.
  *
- * **No client-side filtering.** Every Active volume goes into the batch and the
+ * **One transaction per volume**, per the v2 keeper convention in
+ * docs/KEEPERS.md. The batched `trigger(bytes32[])` is cheaper but runs each id
+ * inside the contract's own try/catch, where a gas shortfall is swallowed and
+ * the transaction still succeeds — so a batched receipt cannot distinguish a
+ * volume that needed nothing from one that was silently starved. Paying for N
+ * transactions buys N unambiguous receipts, which is the thing a keeper exists
+ * to produce.
+ *
+ * **No client-side filtering.** Every Active volume is triggered and the
  * contract decides what each one needs. `_triggerOne` tops up only a real
  * deficit, retires a dead batch, and answers `TopupSkipped` when the payer
- * can't or won't pay — so a volume that needs nothing is a silent no-op costing
- * about 28k gas. Deciding that off-chain would only be saving gas, at the price
- * of a second opinion that can disagree with the chain.
+ * can't or won't pay — so a volume that needs nothing is a no-op costing about
+ * 28k gas. Deciding that off-chain would only be saving gas, at the price of a
+ * second opinion that can disagree with the chain.
  *
- * What actually happened is on the receipt: `toppedUp`, `retired`,
- * `topupSkipped`. Pass `dryRun` to simulate a whole cycle without sending
- * anything.
+ * **Volumes are processed sequentially**, and every one is attempted even after
+ * an earlier one fails; `ok` then reports the run as failed and `failed` names
+ * the volumes. Sequential is what keeps nonces safe without this package
+ * managing them, and it is what bounds a cycle: `cycleTimeout` stops new
+ * transactions rather than truncating one in flight, and anything left over is
+ * warned about and picked up next cycle. A cycle therefore handles roughly
+ * `cycleTimeout / confirmation time` volumes — size the schedule for that
+ * against `graceBlocks`.
  *
  * **Never throws.** Every failure is folded into the returned result, because
  * throwing out of a cron handler causes retry storms. Check `ok`.
@@ -100,8 +118,7 @@ export async function runKeeperCycle<
   const {
     registry,
     mode = { type: "all" },
-    maxIdsPerTx = 50,
-    maxTxPerCycle = 8,
+    maxVolumesPerCycle = 50,
     confirmations = 1,
     receiptTimeout = 60_000,
     cycleTimeout = 120_000,
@@ -113,10 +130,12 @@ export async function runKeeperCycle<
     ok: true,
     mode: mode.type,
     volumeCount: 0,
-    txs: [],
+    volumes: [],
     toppedUp: [],
     retired: [],
     topupSkipped: [],
+    noop: [],
+    failed: [],
     notActive: [],
     warnings: [],
     durationMs: 0,
@@ -140,26 +159,32 @@ export async function runKeeperCycle<
       return result;
     }
 
-    const chunks = chunk(volumeIds, maxIdsPerTx);
-    if (chunks.length > maxTxPerCycle) {
-      const deferred = chunks.slice(maxTxPerCycle).flat().length;
+    const attempting = volumeIds.slice(0, maxVolumesPerCycle);
+    if (attempting.length < volumeIds.length) {
       result.warnings.push(
-        `maxTxPerCycle (${maxTxPerCycle}) reached: ${deferred} volume(s) deferred to the next cycle`,
+        `maxVolumesPerCycle (${maxVolumesPerCycle}) reached: ${
+          volumeIds.length - attempting.length
+        } volume(s) deferred to the next cycle`,
       );
     }
 
     const deadline = startedAt + cycleTimeout;
-    for (const [i, batch] of chunks.slice(0, maxTxPerCycle).entries()) {
+    for (const [i, volumeId] of attempting.entries()) {
       if (i > 0 && Date.now() > deadline) {
         result.warnings.push(
-          `cycle deadline reached after ${i} transaction(s); remaining volumes deferred`,
+          `cycle deadline reached after ${i} volume(s); ${
+            attempting.length - i
+          } deferred to the next cycle`,
         );
         break;
       }
 
-      const tx = await sendChunk(batch);
-      result.txs.push(tx);
-      if (tx.status === "failed" || tx.status === "reverted") result.ok = false;
+      const volume = await sendOne(volumeId);
+      result.volumes.push(volume);
+      if (volume.status === "failed" || volume.status === "reverted") {
+        result.ok = false;
+        result.failed.push(volumeId);
+      }
     }
   } catch (err) {
     result.ok = false;
@@ -182,10 +207,11 @@ export async function runKeeperCycle<
       return volumes.map((v) => v.volumeId);
     }
 
-    // Selected mode still checks status. Not to protect the batch — the
-    // per-item catch swallows a non-Active id as happily as anything else —
-    // but because a caller who named the id is owed an answer about it, and a
-    // silently absent volume is indistinguishable from one that needed nothing.
+    // Selected mode still checks status, so a caller who named an id is owed an
+    // answer about it. Skipping the check would also spend a gas estimate per
+    // dead id only to have it revert `VolumeNotActive` — the same conclusion,
+    // one round trip later, reported as a failure rather than as the expected
+    // end of a volume's life.
     const views = await getAction(
       client,
       multicall,
@@ -206,10 +232,15 @@ export async function runKeeperCycle<
       if (view.status === VOLUME_STATUS.active) active.push(view.volumeId);
       else result.notActive.push(mode.volumeIds[i]!);
     });
+    if (result.notActive.length > 0) {
+      result.warnings.push(
+        `${result.notActive.length} requested volume(s) are not Active: ${result.notActive.join(", ")}`,
+      );
+    }
     return active;
   }
 
-  async function sendChunk(volumeIds: Hex[]): Promise<TxResult> {
+  async function sendOne(volumeId: Hex): Promise<VolumeResult> {
     let hash: Hex | undefined;
     try {
       if (dryRun) {
@@ -223,17 +254,18 @@ export async function runKeeperCycle<
           address: registry,
           abi: registryAbi,
           functionName: "trigger",
-          args: [volumeIds],
+          args: [volumeId],
           account: client.account,
           chain: client.chain,
         } as never);
-        return { volumeIds, status: "simulated" };
+        return { volumeId, status: "simulated" };
       }
 
       hash = await trigger(client, {
         registry,
-        volumeIds,
+        volumeId,
         gasMultiplier: parameters.gasMultiplier,
+        gasFloor: parameters.gasFloor,
       });
 
       const receipt = await getAction(
@@ -242,23 +274,43 @@ export async function runKeeperCycle<
         "waitForTransactionReceipt",
       )({ hash, confirmations, timeout: receiptTimeout });
 
-      const events = decodeCycleEvents(receipt.logs, registry);
-      result.toppedUp.push(...events.toppedUp);
-      result.retired.push(...events.retired);
-      result.topupSkipped.push(...events.topupSkipped);
-
-      return {
-        volumeIds,
-        status: receipt.status === "success" ? "success" : "reverted",
+      const mined = {
+        volumeId,
         hash,
         blockNumber: receipt.blockNumber,
         gasUsed: receipt.gasUsed,
       };
+      if (receipt.status !== "success") {
+        return { ...mined, status: "reverted" as const };
+      }
+
+      const summary = summarizeVolume(
+        decodeCycleEvents(receipt.logs, registry),
+        volumeId,
+      );
+      switch (summary.outcome) {
+        case "toppedUp":
+          result.toppedUp.push({ volumeId, amount: summary.amount });
+          break;
+        case "retired":
+          result.retired.push({ volumeId, reason: summary.reason });
+          result.warnings.push(`${volumeId} retired: ${summary.reason}`);
+          break;
+        case "topupSkipped":
+          result.topupSkipped.push({ volumeId, reason: summary.reason });
+          result.warnings.push(`${volumeId} not funded: ${summary.reason}`);
+          break;
+        case "noop":
+          result.noop.push(volumeId);
+          break;
+      }
+
+      return { ...mined, status: "success" as const, ...summary };
     } catch (err) {
       // A sent-but-unconfirmed transaction still reports its hash so it can be
       // followed up; the next cycle re-decides from chain state regardless.
       return {
-        volumeIds,
+        volumeId,
         status: "failed",
         ...(hash ? { hash } : {}),
         error: message(err),

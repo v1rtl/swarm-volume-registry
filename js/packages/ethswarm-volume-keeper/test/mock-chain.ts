@@ -5,7 +5,13 @@
  * reads, estimate, sign, send, receipt — so the wiring is exercised end to end
  * without anvil. Contract *semantics* are covered by the Foundry suite; what
  * these fixtures prove is that the keeper enumerates and sends the right
- * things.
+ * things, and reads back the right outcome for each volume.
+ *
+ * The trigger path mirrors `_triggerOne`'s check order (DESIGN §8) closely
+ * enough to emit the event the real contract would: retire edges first, then
+ * auth, then the deficit — and *no* event when the volume needs nothing. That
+ * last case is the one the batched overload could never report, so the mock has
+ * to be able to produce it.
  */
 import {
   createWalletClient,
@@ -74,6 +80,18 @@ const SIGNER = "0x3333333333333333333333333333333333333333" as const;
 const TEST_KEY =
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as const;
 
+/** VolumeRetired reason codes, as the contract numbers them. */
+const RETIRE = {
+  ownerDeleted: 1,
+  volumeExpired: 2,
+  batchDied: 3,
+  depthChanged: 4,
+  batchOwnerMismatch: 5,
+} as const;
+
+/** TopupSkipped reason codes. */
+const SKIP = { noAuth: 1, paymentFailed: 2 } as const;
+
 export interface MockVolume {
   volumeId: Hex;
   owner?: Address;
@@ -84,12 +102,16 @@ export interface MockVolume {
   accountActive?: boolean;
   /** Omit to model a batch that does not exist on PostageStamp. */
   batch?: { owner?: Address; depth?: number; normalisedBalance: bigint };
+  /** Model a payer whose `transferFrom` fails: BZZ balance or allowance gone. */
+  payerBroke?: boolean;
 }
 
 export interface MockChainOptions {
   volumes?: MockVolume[];
   lastPrice?: bigint;
   outPayment?: bigint;
+  /** The registry's immutable. Only the mock needs it; the keeper never reads it. */
+  graceBlocks?: bigint;
   blockNumber?: bigint;
   timestamp?: bigint;
   balance?: bigint;
@@ -128,19 +150,70 @@ const volumeTuple = (v: MockVolume) => ({
   accountActive: v.accountActive ?? true,
 });
 
+/** The single event a `trigger(bytes32)` receipt carries, or none. */
+type Emission =
+  | { event: "Toppedup"; amount: bigint; newBalance: bigint }
+  | { event: "VolumeRetired"; reason: number }
+  | { event: "TopupSkipped"; reason: number }
+  | undefined;
+
 export function mockChain(options: MockChainOptions = {}) {
   const volumes = options.volumes ?? [];
   const lastPrice = options.lastPrice ?? 44445n;
   const outPayment = options.outPayment ?? 1_000_000n;
+  const graceBlocks = options.graceBlocks ?? 17_280n;
   const blockNumber = options.blockNumber ?? 8_000_000n;
   const timestamp = options.timestamp ?? 1_700_000_000n;
 
-  const triggerCalls: Hex[][] = [];
+  const triggerCalls: Hex[] = [];
   const sentGas: bigint[] = [];
   const calls: string[] = [];
-  const receipts = new Map<Hex, { ids: Hex[] }>();
+  const receipts = new Map<Hex, { volumeId: Hex }>();
   let multicallCount = 0;
   let postageReads = 0;
+
+  const find = (id: Hex) =>
+    volumes.find((v) => v.volumeId.toLowerCase() === id.toLowerCase());
+
+  const isActive = (v: MockVolume | undefined) => !!v && (v.status ?? 1) === 1;
+
+  /** `_triggerOne`'s decision, in the same order the contract makes it. */
+  function outcomeFor(v: MockVolume): Emission {
+    const batch = v.batch;
+    const depth = v.depth ?? 20;
+    const chunkSigner = v.chunkSigner ?? SIGNER;
+
+    if (!batch || batch.normalisedBalance <= outPayment) {
+      return { event: "VolumeRetired", reason: RETIRE.batchDied };
+    }
+    if ((batch.owner ?? chunkSigner) !== chunkSigner) {
+      return { event: "VolumeRetired", reason: RETIRE.batchOwnerMismatch };
+    }
+    if ((batch.depth ?? depth) !== depth) {
+      return { event: "VolumeRetired", reason: RETIRE.depthChanged };
+    }
+    const ttl = v.ttlExpiry ?? 0n;
+    if (ttl !== 0n && timestamp >= ttl) {
+      return { event: "VolumeRetired", reason: RETIRE.volumeExpired };
+    }
+    if (!(v.accountActive ?? true)) {
+      return { event: "TopupSkipped", reason: SKIP.noAuth };
+    }
+
+    const remaining = batch.normalisedBalance - outPayment;
+    const target = lastPrice * graceBlocks;
+    if (remaining >= target) return undefined; // I5: zero deficit is silent
+    if (v.payerBroke) {
+      return { event: "TopupSkipped", reason: SKIP.paymentFailed };
+    }
+
+    const deficit = target - remaining;
+    return {
+      event: "Toppedup",
+      amount: deficit << BigInt(depth),
+      newBalance: batch.normalisedBalance + deficit,
+    };
+  }
 
   function callRegistry(data: Hex): Hex {
     const { functionName, args } = decodeFunctionData({ abi: registryAbi, data });
@@ -160,7 +233,7 @@ export function mockChain(options: MockChainOptions = {}) {
       }
       case "getVolume": {
         const [id] = args as readonly [Hex];
-        const found = volumes.find((v) => v.volumeId.toLowerCase() === id.toLowerCase());
+        const found = find(id);
         const view = found
           ? volumeTuple(found)
           : {
@@ -176,8 +249,16 @@ export function mockChain(options: MockChainOptions = {}) {
             };
         return encodeFunctionResult({ abi: registryAbi, functionName, result: view });
       }
-      case "trigger":
+      case "trigger": {
+        // Step 1 of `_triggerOne`. Unlike the batched overload there is no
+        // try/catch to swallow this, so it reaches estimation and the send is
+        // never paid for.
+        const [id] = args as readonly [Hex];
+        if (!isActive(find(id))) {
+          throw new Error("execution reverted: VolumeNotActive");
+        }
         return "0x";
+      }
       default:
         throw new Error(`mock registry: unhandled ${functionName}`);
     }
@@ -193,7 +274,7 @@ export function mockChain(options: MockChainOptions = {}) {
         return encodeFunctionResult({ abi: postageAbi, functionName, result: outPayment });
       case "batches": {
         const [id] = args as readonly [Hex];
-        const found = volumes.find((v) => v.volumeId.toLowerCase() === id.toLowerCase());
+        const found = find(id);
         const batch = found?.batch;
         return encodeFunctionResult({
           abi: postageAbi,
@@ -242,26 +323,37 @@ export function mockChain(options: MockChainOptions = {}) {
     });
   }
 
-  /** One `Toppedup` per id, so receipt decoding has something to chew on. */
-  function receiptLogs(ids: Hex[]) {
-    return ids.map((volumeId, i) => ({
-      address: REGISTRY,
-      topics: encodeEventTopics({
-        abi: registryAbi,
-        eventName: "Toppedup",
-        args: { volumeId },
-      }),
-      data: encodeAbiParameters(
-        [{ type: "uint256" }, { type: "uint256" }],
-        [1000n, 2000n],
-      ),
-      blockNumber: numberToHex(blockNumber),
-      blockHash: keccak256(toHex("block")),
-      transactionHash: keccak256(toHex("tx")),
-      transactionIndex: "0x0",
-      logIndex: numberToHex(i),
-      removed: false,
-    }));
+  /** Whatever the contract would have emitted for this one volume — or nothing. */
+  function receiptLogs(volumeId: Hex) {
+    const volume = find(volumeId);
+    const emission = volume ? outcomeFor(volume) : undefined;
+    if (!emission) return [];
+
+    const data =
+      emission.event === "Toppedup"
+        ? encodeAbiParameters(
+            [{ type: "uint256" }, { type: "uint256" }],
+            [emission.amount, emission.newBalance],
+          )
+        : encodeAbiParameters([{ type: "uint8" }], [emission.reason]);
+
+    return [
+      {
+        address: REGISTRY,
+        topics: encodeEventTopics({
+          abi: registryAbi,
+          eventName: emission.event,
+          args: { volumeId },
+        }),
+        data,
+        blockNumber: numberToHex(blockNumber),
+        blockHash: keccak256(toHex("block")),
+        transactionHash: keccak256(toHex("tx")),
+        transactionIndex: "0x0",
+        logIndex: "0x0",
+        removed: false,
+      },
+    ];
   }
 
   const transport = custom({
@@ -290,6 +382,9 @@ export function mockChain(options: MockChainOptions = {}) {
         case "eth_call":
           return handleCall(args[0] as { to: Address; data: Hex });
         case "eth_estimateGas":
+          // Run the call so a revert surfaces here, the way a node's estimate
+          // does — that is what makes estimation the keeper's pre-flight check.
+          handleCall(args[0] as { to: Address; data: Hex });
           return numberToHex(options.estimateGas ?? 500_000n);
         case "eth_getBalance":
           return numberToHex(options.balance ?? 10n ** 18n);
@@ -306,10 +401,10 @@ export function mockChain(options: MockChainOptions = {}) {
             abi: registryAbi,
             data: data as Hex,
           });
-          const ids = (callArgs as readonly [readonly Hex[]])[0] as Hex[];
-          triggerCalls.push(ids);
+          const volumeId = (callArgs as readonly [Hex])[0];
+          triggerCalls.push(volumeId);
           const hash = keccak256(toHex(`tx-${triggerCalls.length}`));
-          receipts.set(hash, { ids });
+          receipts.set(hash, { volumeId });
           return hash;
         }
         case "eth_getTransactionReceipt": {
@@ -329,7 +424,7 @@ export function mockChain(options: MockChainOptions = {}) {
             contractAddress: null,
             status: options.revertTx ? "0x0" : "0x1",
             type: "0x2",
-            logs: options.revertTx ? [] : receiptLogs(sent.ids),
+            logs: options.revertTx ? [] : receiptLogs(sent.volumeId),
             logsBloom: `0x${"0".repeat(512)}`,
           };
         }
@@ -350,6 +445,7 @@ export function mockChain(options: MockChainOptions = {}) {
 
   return {
     client,
+    /** The volume id carried by each transaction sent, in order. */
     triggerCalls,
     /** Gas limit carried by each transaction actually sent. */
     sentGas,

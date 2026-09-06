@@ -1,6 +1,65 @@
 import { describe, expect, test } from "bun:test";
-import { decodeErrorResult, encodeErrorResult } from "viem";
+import { decodeErrorResult, encodeErrorResult, encodeFunctionData } from "viem";
 import { registryAbi } from "../src/abi.js";
+
+// `forge inspect VolumeRegistry methodIdentifiers`, run against
+// contracts/src/VolumeRegistry.sol. The hand-written ABI has to encode the same
+// calls the deployed contract answers to.
+const METHODS = {
+  "getActiveVolumeCount()": "0xe7b4ed6a",
+  "getActiveVolumes(uint256,uint256)": "0x68abda20",
+  "getVolume(bytes32)": "0x92650fb3",
+  "trigger(bytes32)": "0x4c097cb4",
+} as const;
+
+/** The overload a v2 keeper must not call. Present on chain, absent from this ABI. */
+const BATCHED_TRIGGER = "0x5ef6eac9";
+
+describe("registry call ABI", () => {
+  const encoded = {
+    "getActiveVolumeCount()": encodeFunctionData({
+      abi: registryAbi,
+      functionName: "getActiveVolumeCount",
+    }),
+    "getActiveVolumes(uint256,uint256)": encodeFunctionData({
+      abi: registryAbi,
+      functionName: "getActiveVolumes",
+      args: [0n, 100n],
+    }),
+    "getVolume(bytes32)": encodeFunctionData({
+      abi: registryAbi,
+      functionName: "getVolume",
+      args: [`0x${"11".repeat(32)}`],
+    }),
+    "trigger(bytes32)": encodeFunctionData({
+      abi: registryAbi,
+      functionName: "trigger",
+      args: [`0x${"11".repeat(32)}`],
+    }),
+  } as const;
+
+  for (const [signature, selector] of Object.entries(METHODS)) {
+    test(`${signature} encodes to ${selector}`, () => {
+      expect(encoded[signature as keyof typeof METHODS].slice(0, 10)).toBe(selector);
+    });
+  }
+
+  // docs/KEEPERS.md: a v2 keeper calls trigger(bytes32) per volume. The batched
+  // overload swallows per-item reverts, so a gas-starved volume is
+  // indistinguishable from a healthy one. Leaving it out of this ABI is what
+  // makes that unbypassable — put it back and the keeper can silently regress.
+  test("carries no batched trigger to fall back to", () => {
+    expect(encoded["trigger(bytes32)"].slice(0, 10)).not.toBe(BATCHED_TRIGGER);
+
+    const triggers = registryAbi.filter(
+      (item) => item.type === "function" && item.name === "trigger",
+    );
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]).toMatchObject({
+      inputs: [{ type: "bytes32", name: "volumeId" }],
+    });
+  });
+});
 
 // Selectors as the compiler computes them: `forge inspect VolumeRegistry
 // errors`, run against contracts/src/VolumeRegistry.sol. A mismatch means the

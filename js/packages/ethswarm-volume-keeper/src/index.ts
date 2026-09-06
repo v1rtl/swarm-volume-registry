@@ -7,4 +7,10 @@ export {
   type RunKeeperCycleParameters,
   type RunKeeperCycleReturnType,
 } from "./actions/runKeeperCycle.js";
-export type { KeeperMode, TxResult, VolumeOutcome, VolumeView } from "./types.js";
+export type {
+  KeeperMode,
+  VolumeOutcome,
+  VolumeOutcomeKind,
+  VolumeResult,
+  VolumeView,
+} from "./types.js";

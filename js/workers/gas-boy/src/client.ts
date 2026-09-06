@@ -37,8 +37,8 @@ export interface Env {
   /** Comma-separated volume ids. Present ⇒ maintain only these. */
   VOLUME_IDS?: string;
   DRY_RUN?: string;
-  MAX_IDS_PER_TX?: string;
-  MAX_TX_PER_CYCLE?: string;
+  /** Volumes attempted per cycle — one transaction each. */
+  MAX_VOLUMES_PER_CYCLE?: string;
   PAGE_SIZE?: string;
   /** Warn when the keeper's native balance drops below this. */
   MIN_BALANCE_WEI?: string;
@@ -95,8 +95,7 @@ export interface KeeperOptions {
   registry: Address;
   mode: KeeperMode;
   dryRun: boolean;
-  maxIdsPerTx?: number;
-  maxTxPerCycle?: number;
+  maxVolumesPerCycle?: number;
   pageSize?: number;
   minBalanceWei: bigint;
 }
@@ -119,8 +118,7 @@ export function readOptions(env: Env): KeeperOptions {
       ? { type: "selected", volumeIds: volumeIds as Hex[] }
       : { type: "all" },
     dryRun: !!env.DRY_RUN && !["false", "0", "no"].includes(env.DRY_RUN.toLowerCase()),
-    maxIdsPerTx: num(env.MAX_IDS_PER_TX),
-    maxTxPerCycle: num(env.MAX_TX_PER_CYCLE),
+    maxVolumesPerCycle: num(env.MAX_VOLUMES_PER_CYCLE),
     pageSize: num(env.PAGE_SIZE),
     minBalanceWei: env.MIN_BALANCE_WEI ? BigInt(env.MIN_BALANCE_WEI) : 0n,
   };

@@ -24,7 +24,8 @@ RPC_URL="https://..."
 # Log a warning when the keeper EOA's balance drops below this (wei).
 # MIN_BALANCE_WEI="100000000000000000"
 
-# Batching limits. Defaults: 50 ids per tx, 8 txs per cycle, 100 per read page.
-# MAX_IDS_PER_TX="50"
-# MAX_TX_PER_CYCLE="8"
+# Work limits. One transaction per volume, so this caps both. Overflow defers
+# to the next cycle and is reported in `warnings`. Defaults: 50 volumes per
+# cycle, 100 volumes per read page.
+# MAX_VOLUMES_PER_CYCLE="50"
 # PAGE_SIZE="100"

@@ -1,15 +1,25 @@
 // The VolumeRegistry surface a keeper cycle touches, and nothing more.
 // Kept `as const` so viem can infer per-function argument and return types.
 //
-// Deliberately partial on the call side. Enumeration, the batched write, and
-// the events that explain what the write did — that is the whole cycle. The
+// Deliberately partial on the call side. Enumeration, the single-volume write,
+// and the events that explain what the write did — that is the whole cycle. The
 // contract's full error set is here regardless, because decoding a failure
 // costs nothing and is worth having when there is one. `postage()`,
 // `graceBlocks()` and `reap()` are absent because nothing here calls them: the
 // contract decides what each volume needs, so the keeper never reads
-// PostageStamp state to second-guess it. The singular `trigger(bytes32)`
-// overload is omitted too — the batched form covers a single id, and one
-// signature keeps viem's overload inference simple.
+// PostageStamp state to second-guess it.
+//
+// `trigger(bytes32[])` is absent, and its absence is the point. The batched
+// overload runs every id as `try this._triggerExt(id) {} catch {}`, and an
+// inner call receives only 63/64 of the remaining gas — so a short gas limit
+// lets the inner call run out, the `catch` swallow it, and the transaction
+// *succeed* having topped up nothing. A mined batch therefore cannot tell "this
+// volume needed nothing" apart from "this volume was starved of gas", and both
+// look like a clean receipt. Per docs/KEEPERS.md, a v2 keeper calls
+// `trigger(bytes32)` once per volume: one receipt per volume, one unambiguous
+// outcome, and a real top-level revert when something is wrong. Leaving the
+// overload out of this ABI is what makes that unbypassable — and it keeps
+// viem's overload inference simple.
 
 export const registryAbi = [
   {
@@ -74,7 +84,7 @@ export const registryAbi = [
     type: "function",
     name: "trigger",
     stateMutability: "nonpayable",
-    inputs: [{ type: "bytes32[]", name: "volumeIds" }],
+    inputs: [{ type: "bytes32", name: "volumeId" }],
     outputs: [],
   },
   // Events decoded off the trigger receipt to explain per-volume outcomes.
@@ -108,12 +118,13 @@ export const registryAbi = [
   // matches revert data against them by selector, and they add no way to drive
   // the registry.
   //
-  // Against *this* contract they should stay quiet. `trigger(bytes32[])` runs
-  // every id as `try this._triggerExt(id) {} catch {}`, so `VolumeNotActive`
-  // never reaches the caller, the reads above cannot revert, and a receipt
-  // carries no revert data. They earn their place when the configured address
-  // is not the registry you think it is — a stale deployment, a wrong chain —
-  // which is exactly when a keeper's logs are all you have.
+  // `VolumeNotActive` is live surface now that the keeper calls
+  // `trigger(bytes32)`: step 1 of `_triggerOne` reverts on a volume that was
+  // retired between enumeration and the send, and with no batching try/catch in
+  // the way that revert reaches gas estimation, where it costs nothing and
+  // names itself. The rest earn their place when the configured address is not
+  // the registry you think it is — a stale deployment, a wrong chain — which is
+  // exactly when a keeper's logs are all you have.
   { type: "error", name: "AccountNotActive", inputs: [] },
   { type: "error", name: "DesignationClearedOnActivate", inputs: [] },
   {

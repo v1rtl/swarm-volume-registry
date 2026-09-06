@@ -27,8 +27,7 @@ async function cycle(env: Env) {
     registry: options.registry,
     mode: options.mode,
     dryRun: options.dryRun,
-    maxIdsPerTx: options.maxIdsPerTx,
-    maxTxPerCycle: options.maxTxPerCycle,
+    maxVolumesPerCycle: options.maxVolumesPerCycle,
     pageSize: options.pageSize,
   });
 
