@@ -2,7 +2,7 @@
 
 One keeper cycle against a [Swarm](https://www.ethswarm.org/) Volume Registry: enumerate the active volumes and trigger them.
 
-Not a registry SDK. The export surface is the cycle and the types it returns — the reads, the ABI and the send loop behind it are internal, so there is no second way to drive the registry that has to be kept honest against the contract. Deployment concerns are yours too: no transports, chain table, RPC list, key handling or env parsing in here. [`workers/gas-boy`](../../workers/gas-boy) is the reference bot that supplies them.
+Not a registry SDK. The export surface is the cycle and the types it returns — the reads, the ABI and the send loop behind it are internal, so there is no second way to drive the registry that has to be kept honest against the contract. Deployment concerns are yours too: no transports, chain table, RPC list, key handling or env parsing in here. Two reference bots supply them: [`workers/gas-boy`](../../workers/gas-boy) (Cloudflare Worker) and [`workers/keeper-action`](../../workers/keeper-action) (GitHub Actions cron).
 
 Targets VolumeRegistry v2 and follows the keeper conventions in [`docs/KEEPERS.md`](../../../docs/KEEPERS.md).
 

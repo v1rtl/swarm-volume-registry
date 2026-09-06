@@ -1,0 +1,20 @@
+{
+  "name": "keeper-action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One-shot keeper cycle for a GitHub Actions cron schedule — the non-Cloudflare runtime variant",
+  "scripts": {
+    "build:pkg": "cd ../../packages/ethswarm-volume-keeper && bun run build",
+    "start": "bun run build:pkg && bun run src/main.ts",
+    "typecheck": "bun run build:pkg && tsc --noEmit"
+  },
+  "dependencies": {
+    "ethswarm-volume-keeper": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.6.3"
+  }
+}

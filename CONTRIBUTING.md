@@ -73,8 +73,14 @@ bound the value implies.
 
 ## Keeper package
 
-`js/packages/ethswarm-volume-keeper` (the keeper cycle) and `js/workers/gas-boy`
-(the reference Cloudflare Worker) form a Bun workspace rooted at `js/`.
+`js/packages/ethswarm-volume-keeper` (the keeper cycle) and the bots that run it
+form a Bun workspace rooted at `js/`. There are two bots, deliberately on
+unrelated infrastructure so that a failure in one is unlikely to be a failure in
+both:
+
+- `js/workers/gas-boy` — a cron-triggered Cloudflare Worker.
+- `js/workers/keeper-action` — a one-shot run driven by
+  `.github/workflows/keeper.yml` on a GitHub Actions schedule.
 
 ```sh
 cd js
@@ -84,11 +90,16 @@ bun test packages/
 bun run build          # tsc → packages/ethswarm-volume-keeper/dist
 ```
 
-The worker imports the package's `dist/`, so its scripts build the package
-first. It needs no chain access to typecheck; `bun run dev` in
+Both bots import the package's `dist/`, so their scripts build the package
+first. Neither needs chain access to typecheck. `bun run dev` in
 `js/workers/gas-boy` starts `wrangler dev` against `.dev.vars` (see
-`.dev.vars.example`).
+`.dev.vars.example`); `bun run start` in `js/workers/keeper-action` runs one
+cycle from environment variables, and `DRY_RUN=true` makes that safe to point
+anywhere.
 
 The package is deliberately free of transports, chain definitions, RPC
 endpoints, key handling and environment parsing — actions take a viem client
-the caller supplies. Those concerns belong in a bot, e.g. `js/workers/gas-boy`.
+the caller supplies. Those concerns belong in a bot. Keeping them there is what
+lets the two bots differ where it matters: the Worker ranks its RPC endpoints
+across ticks because its isolate persists, while the Actions runner probes them
+once per run because it does not.
