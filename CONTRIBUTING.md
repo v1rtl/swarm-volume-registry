@@ -73,14 +73,16 @@ bound the value implies.
 
 ## Keeper package
 
-`js/packages/ethswarm-volume-keeper` (the keeper cycle) and the bots that run it
-form a Bun workspace rooted at `js/`. There are two bots, deliberately on
-unrelated infrastructure so that a failure in one is unlikely to be a failure in
-both:
+`js/packages/ethswarm-volume-keeper` (the keeper cycle) and
+`js/workers/gas-boy` (a cron-triggered Cloudflare Worker) form a Bun workspace
+rooted at `js/`.
 
-- `js/workers/gas-boy` — a cron-triggered Cloudflare Worker.
-- `js/workers/keeper-action` — a one-shot run driven by
-  `.github/workflows/keeper.yml` on a GitHub Actions schedule.
+`services/keeper` is the second bot — a one-shot run driven by
+`.github/workflows/keeper.yml` on a GitHub Actions schedule. Two bots on
+unrelated infrastructure means a failure in one is unlikely to be a failure in
+both. It is a standalone Bun project with its own lockfile rather than a
+workspace member, because it is deployed rather than published; it depends on
+the keeper package by path.
 
 ```sh
 cd js
@@ -90,12 +92,26 @@ bun test packages/
 bun run build          # tsc → packages/ethswarm-volume-keeper/dist
 ```
 
-Both bots import the package's `dist/`, so their scripts build the package
-first. Neither needs chain access to typecheck. `bun run dev` in
-`js/workers/gas-boy` starts `wrangler dev` against `.dev.vars` (see
-`.dev.vars.example`); `bun run start` in `js/workers/keeper-action` runs one
-cycle from environment variables, and `DRY_RUN=true` makes that safe to point
-anywhere.
+Both bots consume the package's `dist/`, which is not committed. `gas-boy` is a
+workspace member and builds it from its own scripts. `services/keeper` installs
+it by path, so build the package *before* installing there, and rebuild and
+reinstall after changing it:
+
+```sh
+cd js && bun install && bun run build
+cd ../services/keeper && bun install
+bun test && bun run typecheck
+```
+
+Its `viem` is pinned to the exact version the `js/` workspace resolves. That
+coupling is real rather than tidy-mindedness: `runKeeperCycle` takes a viem
+client, so the package's public types are viem types, and a version skew across
+the two lockfiles produces two incompatible `Client` types. Bump both together.
+
+Neither bot needs chain access to typecheck. `bun run dev` in `js/workers/gas-boy`
+starts `wrangler dev` against `.dev.vars` (see `.dev.vars.example`);
+`bun run start` in `services/keeper` runs one cycle from environment variables,
+and `DRY_RUN=true` makes that safe to point anywhere.
 
 The package is deliberately free of transports, chain definitions, RPC
 endpoints, key handling and environment parsing — actions take a viem client

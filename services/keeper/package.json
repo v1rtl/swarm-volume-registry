@@ -1,0 +1,23 @@
+{
+  "name": "keeper",
+  "version": "0.1.0",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "description": "Swarm VolumeRegistry keeper, run on a GitHub Actions cron schedule",
+  "scripts": {
+    "start": "bun run index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "ethswarm-volume-keeper": "file:../../js/packages/ethswarm-volume-keeper",
+    "viem": "2.55.16"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

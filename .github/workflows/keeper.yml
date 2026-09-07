@@ -1,6 +1,6 @@
 # Keeper variant #2: a cron-scheduled runner, as an alternative to the
 # Cloudflare Worker in js/workers/gas-boy. Same library, different failure
-# profile — see js/workers/keeper-action/README.md before relying on it.
+# profile — see services/keeper/README.md before relying on it.
 #
 # Two GitHub behaviours dominate everything below:
 #
@@ -10,6 +10,11 @@
 #      activity, and delays them under load — often by 10+ minutes. A keeper
 #      that is silently switched off is worse than one that fails loudly, so
 #      treat the schedule as best-effort and size `graceBlocks` against it.
+#
+# The steps here stay deliberately thin. Deciding what is worth reporting needs
+# to know what the cycle did, so it lives in TypeScript under services/keeper —
+# including the failure notification, which fires on conditions the keeper
+# understands rather than on the job's exit status.
 
 name: keeper
 
@@ -50,14 +55,6 @@ jobs:
     # Secrets and vars come from the GitHub Environment of this name, so the
     # testnet and mainnet keepers cannot share a key by accident.
     environment: ${{ inputs.environment || 'sepolia' }}
-    defaults:
-      run:
-        working-directory: js/workers/keeper-action
-    env:
-      # Job-level so the notify step can test them in `if:` — the `secrets`
-      # context is not available there, but `env` is.
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v5
@@ -68,11 +65,21 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install
+      # services/keeper depends on the library by path and consumes its built
+      # `dist/`, which is not committed — so it has to be built before the
+      # service installs, not after.
+      - name: Build the keeper library
         working-directory: js
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install
+        working-directory: services/keeper
         run: bun install --frozen-lockfile
 
       - name: Run keeper cycle
+        working-directory: services/keeper
         env:
           CHAIN_ID: ${{ vars.CHAIN_ID }}
           REGISTRY_ADDRESS: ${{ vars.REGISTRY_ADDRESS }}
@@ -86,18 +93,8 @@ jobs:
           CYCLE_TIMEOUT_MS: ${{ vars.CYCLE_TIMEOUT_MS }}
           FAIL_ON_WARNING: ${{ vars.FAIL_ON_WARNING }}
           DRY_RUN: ${{ inputs.dry_run }}
+          # Optional. Absent, the run reports through annotations, the job
+          # summary and GitHub's own failed-run email only.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
         run: bun run start
-
-      - name: Notify Telegram on failure
-        if: ${{ failure() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
-        run: |
-          set -euo pipefail
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          curl --silent --show-error --fail-with-body --output /dev/null \
-            --max-time 20 \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "disable_web_page_preview=true" \
-            --data-urlencode "text=Keeper run failed on ${ENVIRONMENT_NAME} (${GITHUB_REPOSITORY}). ${run_url}"
-        env:
-          ENVIRONMENT_NAME: ${{ inputs.environment || 'sepolia' }}

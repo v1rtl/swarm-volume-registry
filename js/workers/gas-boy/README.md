@@ -4,7 +4,7 @@ Cloudflare Worker that runs one `runKeeperCycle` from [`ethswarm-volume-keeper`]
 
 This is one of two bots; everything the library leaves out lives here — `src/client.ts` (env, keys, supported chains, transport) and `src/index.ts` (cron, `/health`, caching, logging).
 
-[`keeper-action`](../keeper-action) is the other: the same cycle on a GitHub Actions schedule, deliberately on unrelated infrastructure. Its README compares the two.
+[`services/keeper`](../../../services/keeper) is the other: the same cycle on a GitHub Actions schedule, deliberately on unrelated infrastructure. Its README compares the two.
 
 You supply the RPC. `RPC_URL` is required and no endpoints ship with this worker; comma-separate several to fail over between them.
 

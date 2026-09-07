@@ -30,18 +30,6 @@
         "wrangler": "^4.112.0",
       },
     },
-    "workers/keeper-action": {
-      "name": "keeper-action",
-      "version": "0.1.0",
-      "dependencies": {
-        "ethswarm-volume-keeper": "workspace:*",
-        "viem": "^2.21.0",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.2.0",
-        "typescript": "^5.6.3",
-      },
-    },
   },
   "packages": {
     "@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.11.1", "", {}, "sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ=="],
@@ -227,8 +215,6 @@
     "gas-boy": ["gas-boy@workspace:workers/gas-boy"],
 
     "isows": ["isows@1.0.7", "", { "peerDependencies": { "ws": "*" } }, "sha512-I1fSfDCZL5P0v33sVqeTDSpcstAg/N+wF5HS033mogOVIp4B+oHC7oOCsA3axAbBSGTJ8QubbNmnIRN/h8U7hg=="],
-
-    "keeper-action": ["keeper-action@workspace:workers/keeper-action"],
 
     "kleur": ["kleur@4.1.5", "", {}, "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ=="],
 
