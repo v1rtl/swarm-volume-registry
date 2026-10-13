@@ -28,6 +28,11 @@ name: keeper-run
 permissions: {}
 
 on:
+  # TEMPORARY, fork test only: registers the workflow so it can be dispatched
+  # from this branch. The job is skipped on push.
+  push:
+    branches: [gha-fork-test]
+    paths: [.github/workflows/keeper-run.yml]
   schedule:
     # Hourly, off the top of the hour: :00 is the busiest slot on the shared
     # scheduler and the most delayed. test/gha.test.ts holds this to the
