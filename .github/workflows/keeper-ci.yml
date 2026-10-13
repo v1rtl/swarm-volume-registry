@@ -1,9 +1,11 @@
-# Keeper Worker CI. Installs, typechecks, tests, and bundles both deployments
-# with `wrangler deploy --dry-run`.
+# Keeper CI. Installs, typechecks, tests, and bundles both deployments with
+# `wrangler deploy --dry-run`. The tests cover the GitHub Actions runner and
+# keeper-run.yml itself too.
 #
-# It never runs a keeper cycle: Cloudflare Cron Triggers are the only
-# scheduler. Nothing here needs Cloudflare credentials either — a dry run
-# bundles locally — so it runs the same on pull requests from forks.
+# It never runs a keeper cycle: that is the Cloudflare Cron Triggers' job, or
+# keeper-run.yml's for a deployment on GitHub Actions. Nothing here needs
+# credentials either — a dry run bundles locally — so it runs the same on pull
+# requests from forks.
 
 name: keeper-ci
 

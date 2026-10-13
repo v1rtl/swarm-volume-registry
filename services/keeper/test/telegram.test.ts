@@ -90,6 +90,16 @@ describe("formatTelegramMessage", () => {
       expect(line).toBe(`  tx ${TX}`);
     }
   });
+
+  // GitHub Actions has a page per run; Workers Logs does not.
+  test("links the run where there is one, and sends the overflow there", () => {
+    const runUrl = "https://github.com/owner/repo/actions/runs/42";
+    expect(formatTelegramMessage(report())).not.toContain("Run: ");
+    expect(formatTelegramMessage(report({ runUrl }))).toContain(`Run: ${runUrl}`);
+
+    const failures = Array.from({ length: 60 }, () => ({ volumeId: VOLUME, message: "x" }));
+    expect(formatTelegramMessage(report({ runUrl, failures }))).toMatch(/more — see the run$/);
+  });
 });
 
 describe("shouldNotify", () => {

@@ -84,8 +84,9 @@ steps are in [`RELEASING.md`](./RELEASING.md).
 ## Keeper
 
 [`services/keeper`](./services/keeper) is the keeper: one Cloudflare Worker,
-deployed as `keeper-sepolia` and `keeper-gnosis`. A standalone Bun project with
-its own lockfile; nothing else in the repository depends on it.
+deployed as `keeper-sepolia` and `keeper-gnosis`, which can instead run from a
+scheduled GitHub Actions job per deployment. A standalone Bun project with its
+own lockfile; nothing else in the repository depends on it.
 
 ```sh
 cd services/keeper
@@ -96,9 +97,10 @@ bun run check:deploy   # wrangler deploy --dry-run, both envs
 ```
 
 None of this needs chain access or Cloudflare credentials. CI runs the same
-steps (`.github/workflows/keeper-ci.yml`); deploys go through
-`.github/workflows/keeper-deploy.yml`. Setup, configuration and local runs are
-in its [README](./services/keeper/README.md).
+steps (`.github/workflows/keeper-ci.yml`); Worker deploys go through
+`.github/workflows/keeper-deploy.yml`, and GitHub Actions runs through
+`.github/workflows/keeper-run.yml`. Setup, configuration, choosing a platform
+and local runs are in its [README](./services/keeper/README.md).
 
 ## Indexer
 

@@ -37,6 +37,7 @@ export function formatTelegramMessage(report: KeeperReport): string {
     `Chain: ${chain}`,
     `Registry: ${report.registry ?? "unset"}`,
     ...(report.keeper ? [`Keeper: ${report.keeper}`] : []),
+    ...(report.runUrl ? [`Run: ${report.runUrl}`] : []),
   ];
 
   const sections: Array<[string, KeeperIssue[]]> = [
@@ -50,7 +51,7 @@ export function formatTelegramMessage(report: KeeperReport): string {
     for (const issue of issues) blocks.push(formatIssue(issue));
   }
 
-  return fit(header.join("\n"), blocks);
+  return fit(header.join("\n"), blocks, report.runUrl ? "the run" : "Workers Logs");
 }
 
 function formatIssue(issue: KeeperIssue): string {
@@ -66,11 +67,11 @@ function formatIssue(issue: KeeperIssue): string {
  * left out and where the rest are. A message cut mid-hash is worse than one
  * that admits it is incomplete.
  */
-function fit(header: string, blocks: string[]): string {
+function fit(header: string, blocks: string[], where: string): string {
   let text = header;
   for (const [i, block] of blocks.entries()) {
     const rest = blocks.slice(i).filter((b) => b.startsWith("•")).length;
-    const tail = `\n… and ${rest} more — see Workers Logs`;
+    const tail = `\n… and ${rest} more — see ${where}`;
     if (text.length + 1 + block.length + tail.length > TELEGRAM_MAX_LENGTH) {
       return text + tail;
     }

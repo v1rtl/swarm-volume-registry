@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { unstable_readConfig } from "wrangler";
-import { PROBE_TIMEOUT_MS } from "../src/client.js";
+import { MAX_RUN_SECONDS, cronIntervalSeconds, runBudgetMs } from "../src/schedule.js";
 import {
   ConfigError,
   readConfig,
@@ -168,24 +168,6 @@ const WRANGLER = join(import.meta.dir, "..", "wrangler.jsonc");
 const DEPLOYMENTS = ["sepolia", "gnosis"] as const;
 const SECRETS = ["PRIVATE_KEY", "RPC_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"].sort();
 
-/** Cron Triggers stop a run at 15 minutes regardless of schedule. */
-const CRON_WALL_CLOCK_MS = 15 * 60_000;
-/** Everything around the cycle: reads, the balance check, the alert. */
-const SLACK_MS = 5_000;
-
-/**
- * Seconds between runs, for the cron shapes this repo uses. Anything else
- * fails loudly so the budget check below cannot be skipped by accident.
- */
-function cronIntervalSeconds(expr: string): number {
-  const [minute, hour, dom, month, dow] = expr.trim().split(/\s+/);
-  if ([dom, month, dow].some((f) => f !== "*")) throw new Error(`unsupported cron: ${expr}`);
-  if (hour === "*" && minute === "*") return 60;
-  if (hour === "*" && /^\*\/\d+$/.test(minute!)) return Number(minute!.slice(2)) * 60;
-  if (hour === "*" && /^\d+$/.test(minute!)) return 3600;
-  throw new Error(`unsupported cron: ${expr} — teach cronIntervalSeconds about it`);
-}
-
 describe("committed deployments (wrangler.jsonc)", () => {
   for (const name of DEPLOYMENTS) {
     const deployment = unstable_readConfig({ config: WRANGLER, env: name });
@@ -218,13 +200,9 @@ describe("committed deployments (wrangler.jsonc)", () => {
       test("a whole run fits inside one cron interval", () => {
         expect(deployment.triggers.crons).toHaveLength(1);
         const intervalMs = cronIntervalSeconds(deployment.triggers.crons[0]!) * 1000;
-        const budgetMs =
-          PROBE_TIMEOUT_MS +
-          Number(vars.CYCLE_TIMEOUT_MS) +
-          Number(vars.RECEIPT_TIMEOUT_MS) +
-          SLACK_MS;
+        const budgetMs = runBudgetMs(vars);
         expect(budgetMs).toBeLessThanOrEqual(intervalMs);
-        expect(budgetMs).toBeLessThanOrEqual(CRON_WALL_CLOCK_MS);
+        expect(budgetMs).toBeLessThanOrEqual(MAX_RUN_SECONDS * 1000);
       });
 
       test("has Workers Logs and Traces enabled", () => {

@@ -1,6 +1,8 @@
 /**
  * The keeper Worker. One implementation, deployed once per chain — see the
- * envs in wrangler.jsonc. Cloudflare Cron Triggers are the only scheduler.
+ * envs in wrangler.jsonc. Each deployment runs on exactly one scheduler:
+ * its Cloudflare Cron Trigger, or a GitHub Actions job (src/gha/run.ts) that
+ * calls {@link runScheduled} directly.
  *
  * Each scheduled run: validate the configuration, probe the RPC endpoints,
  * run one keeper cycle, and turn what happened into a single report. That
@@ -49,7 +51,7 @@ const message = (err: unknown): string =>
  */
 export async function runScheduled(
   env: KeeperEnv,
-  event: { cron?: string; scheduledTime?: number } = {},
+  event: { cron?: string; scheduledTime?: number; runUrl?: string } = {},
 ): Promise<KeeperReport> {
   const run: RunInput = { identity: readIdentity(env), ...event, startedAt: Date.now() };
 

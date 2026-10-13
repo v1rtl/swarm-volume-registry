@@ -5,7 +5,11 @@
 #   manual dispatch  → keeper-gnosis (or keeper-sepolia from any ref), after
 #                      approval
 #
-# Keeper runs only in Cloudflare Workers; GitHub Actions only deploys.
+# Only for deployments that run on Cloudflare. One whose repository variable
+# KEEPER_PLATFORM_<ENV> is `github` runs from keeper-run.yml instead, and is
+# never deployed here: a Worker with a cron would be a second scheduler on the
+# same wallet.
+#
 # The approval is the `gnosis` GitHub Environment's required reviewers, which
 # live in repository settings rather than in this file — see
 # services/keeper/README.md.
@@ -46,17 +50,30 @@ jobs:
     permissions: {}
     outputs:
       environment: ${{ steps.choose.outputs.environment }}
+      platform: ${{ steps.choose.outputs.platform }}
     steps:
       - id: choose
         env:
           EVENT: ${{ github.event_name }}
           REQUESTED: ${{ inputs.environment }}
+          PLATFORM_SEPOLIA: ${{ vars.KEEPER_PLATFORM_SEPOLIA }}
+          PLATFORM_GNOSIS: ${{ vars.KEEPER_PLATFORM_GNOSIS }}
         run: |
-          if [ "$EVENT" = push ]; then
-            echo "environment=sepolia" >> "$GITHUB_OUTPUT"
-          else
-            echo "environment=$REQUESTED" >> "$GITHUB_OUTPUT"
-          fi
+          if [ "$EVENT" = push ]; then target=sepolia; else target="$REQUESTED"; fi
+          case "$target" in
+            sepolia) platform="${PLATFORM_SEPOLIA:-cloudflare}" ;;
+            gnosis) platform="${PLATFORM_GNOSIS:-cloudflare}" ;;
+          esac
+          case "$platform" in
+            cloudflare) ;;
+            github)
+              echo "::notice title=keeper-$target::runs on GitHub Actions (keeper-run.yml); not deploying the Worker" ;;
+            *)
+              echo "::error title=keeper-$target::KEEPER_PLATFORM_${target^^} must be cloudflare or github, got \"$platform\""
+              exit 1 ;;
+          esac
+          echo "environment=$target" >> "$GITHUB_OUTPUT"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
 
   check:
     needs: target
@@ -68,6 +85,7 @@ jobs:
   deploy:
     name: Deploy keeper-${{ needs.target.outputs.environment }}
     needs: [target, check]
+    if: needs.target.outputs.platform == 'cloudflare'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

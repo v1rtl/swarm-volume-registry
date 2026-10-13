@@ -28,6 +28,8 @@ export interface KeeperReport {
   keeper?: Address;
   cron?: string;
   scheduledTime?: number;
+  /** Where this run's own logs are, when the platform has a page per run. */
+  runUrl?: string;
   dryRun?: boolean;
   /** Block the volume list was read at. */
   blockNumber?: string;
@@ -74,6 +76,7 @@ export interface RunInput {
   identity: DeploymentIdentity;
   cron?: string;
   scheduledTime?: number;
+  runUrl?: string;
   startedAt: number;
 }
 
@@ -203,6 +206,7 @@ function identityFields(run: RunInput) {
     ...(registry ? { registry } : {}),
     ...(run.cron ? { cron: run.cron } : {}),
     ...(run.scheduledTime !== undefined ? { scheduledTime: run.scheduledTime } : {}),
+    ...(run.runUrl ? { runUrl: run.runUrl } : {}),
   };
 }
 

@@ -1,0 +1,106 @@
+# Runs the keeper from GitHub Actions: the same `runScheduled` the Worker runs,
+# behind services/keeper/src/gha/run.ts, configured from the same env in
+# wrangler.jsonc. One run per job; failure is the exit code.
+#
+# Each deployment runs on exactly one platform, chosen by the repository
+# variable KEEPER_PLATFORM_<ENV> (`cloudflare`, the default, or `github`).
+# Two schedulers sharing one wallet would race for its nonce (docs/KEEPERS.md).
+#
+#   schedule          → keeper-gnosis, only while KEEPER_PLATFORM_GNOSIS=github
+#   manual dispatch   → either deployment, dry run by default
+#
+# Sepolia is never scheduled here: its graceBlocks (~2.4 min) is shorter than
+# GitHub's minimum interval, let alone its usual delay. Dispatch it to exercise
+# the whole path — secrets, failover, signing, alerting.
+#
+# GitHub's scheduler fails quietly: `schedule` fires only on the default branch,
+# runs are often 5–15 min late or dropped under load, and in a public
+# repository scheduled workflows are disabled after 60 days without activity.
+# Set HEARTBEAT_URL so a schedule that stops firing alerts — see
+# services/keeper/README.md.
+#
+# Secrets come from the GitHub Environment `keeper-<env>`: restricted to the
+# default branch, with no required reviewers — a reviewer gate would hold every
+# scheduled run. These are not the `sepolia`/`gnosis` deploy environments.
+
+name: keeper-run
+
+permissions: {}
+
+on:
+  schedule:
+    # Hourly, off the top of the hour: :00 is the busiest slot on the shared
+    # scheduler and the most delayed. test/gha.test.ts holds this to the
+    # Gnosis run budget.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment to run
+        type: choice
+        options: [sepolia, gnosis]
+        default: sepolia
+      dry_run:
+        description: Enumerate and simulate without sending
+        type: boolean
+        default: true
+
+# Never two runs against one wallet at once. Queue rather than cancel: killing
+# a run between sending a transaction and reading its receipt is exactly the
+# uncertainty a keeper should not manufacture for itself.
+concurrency:
+  group: keeper-run-${{ inputs.environment || 'gnosis' }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: keeper-${{ inputs.environment || 'gnosis' }}
+    # Repository variable: the environment's own are not visible to `if`.
+    if: github.event_name == 'workflow_dispatch' || vars.KEEPER_PLATFORM_GNOSIS == 'github'
+    runs-on: ubuntu-latest
+    # Covers setup plus the longest run keeper-gnosis allows (~11 min), and
+    # stays under the hourly interval. Held to both by test/gha.test.ts.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    environment:
+      name: keeper-${{ inputs.environment || 'gnosis' }}
+    defaults:
+      run:
+        working-directory: services/keeper
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      # No secrets in this step's environment.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check platform
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        env:
+          TARGET: ${{ inputs.environment }}
+          PLATFORM_SEPOLIA: ${{ vars.KEEPER_PLATFORM_SEPOLIA }}
+          PLATFORM_GNOSIS: ${{ vars.KEEPER_PLATFORM_GNOSIS }}
+        run: |
+          if [ "$TARGET" = gnosis ]; then platform="$PLATFORM_GNOSIS"; else platform="$PLATFORM_SEPOLIA"; fi
+          if [ "$platform" != github ]; then
+            echo "::warning title=keeper-$TARGET::keeper-$TARGET runs on ${platform:-cloudflare}. This run is safe only if keeper-$TARGET's GitHub Environment holds a different wallet."
+          fi
+
+      - name: Run keeper
+        env:
+          KEEPER_ENV: ${{ inputs.environment || 'gnosis' }}
+          KEEPER_CRON: ${{ github.event.schedule }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          RPC_URL: ${{ secrets.RPC_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: bun run start:gha

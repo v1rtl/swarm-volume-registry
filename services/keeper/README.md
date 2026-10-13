@@ -2,14 +2,14 @@
 
 The Swarm `VolumeRegistry` keeper: one Cloudflare Worker, deployed once per chain. Each scheduled run enumerates the registry's active volumes, sends `trigger(bytes32)` for each — one transaction per volume, per [`docs/KEEPERS.md`](../../docs/KEEPERS.md) — and reports what the contract did.
 
-Cloudflare Cron Triggers are the only scheduler. GitHub Actions tests and deploys the Worker; it never runs a cycle.
+Each deployment runs on exactly one platform: its Cloudflare Cron Trigger (the default), or a scheduled GitHub Actions job running the same code — see [Running on GitHub Actions](#running-on-github-actions). The repository variable `KEEPER_PLATFORM_<ENV>` (`cloudflare` or `github`) says which.
 
 | Deployment | Worker | Chain | Registry | Schedule |
 |---|---|---|---|---|
-| `sepolia` | `keeper-sepolia` | Sepolia (11155111) | v2-rc2 `0x00f72ee2…3c5a4177` | every 10 minutes |
-| `gnosis` | `keeper-gnosis` | Gnosis (100) | v1 `0x9639ae4c…ddd02aad` | hourly |
+| `sepolia` | `keeper-sepolia` | Sepolia (11155111) | v2-rc2 `0x00f72ee2…3c5a4177` | every 10 minutes (Cloudflare only) |
+| `gnosis` | `keeper-gnosis` | Gnosis (100) | v1 `0x9639ae4c…ddd02aad` | hourly (Cloudflare `:00`, or GitHub `:17`) |
 
-Both are envs in [`wrangler.jsonc`](./wrangler.jsonc), with independent wallets and RPC credentials. They may share one Telegram group; every alert names its deployment, chain and registry.
+Both are envs in [`wrangler.jsonc`](./wrangler.jsonc), with independent wallets and RPC credentials, and that file is their configuration on either platform. They may share one Telegram group; every alert names its deployment, chain and registry.
 
 ## Layout
 
@@ -21,6 +21,8 @@ Both are envs in [`wrangler.jsonc`](./wrangler.jsonc), with independent wallets 
 | `src/keeper/` | the keeper cycle: enumerate at a pinned block, trigger each volume, decode each receipt |
 | `src/reporting.ts` | the one structured report per run that logs and alerts are both rendered from |
 | `src/notifications/telegram.ts` | formats that report for Telegram and sends it |
+| `src/gha/` | the GitHub Actions runner: reads a deployment from `wrangler.jsonc`, masks its secrets, runs it, writes the job summary |
+| `src/schedule.ts` | cron intervals and the run budget, shared by both platforms' checks |
 
 ## What a run reports
 
@@ -96,7 +98,7 @@ Finally, configure CI for all later deploys (so you never deploy from a laptop a
 
    If you changed `wrangler.jsonc`, run `bun run types` and commit the regenerated `worker-configuration.d.ts` (CI fails if stale).
 
-3. Push to a branch — `keeper-ci.yml` runs install/typecheck/test/dry-run for both `sepolia` and `gnosis` envs (and `keeper-deploy.yml` never runs a keeper cycle — it only deploys; Cloudflare Cron Triggers are the only scheduler).
+3. Push to a branch — `keeper-ci.yml` runs install/typecheck/test/dry-run for both `sepolia` and `gnosis` envs (and `keeper-deploy.yml` never runs a keeper cycle — it only deploys). A deployment on GitHub Actions picks up the change from `main` at its next scheduled run; there is nothing to deploy.
 4. Push/merge to `main` auto-deploys `keeper-sepolia` via `keeper-deploy.yml`. Deploy `keeper-gnosis` by manual `workflow_dispatch` (choose `gnosis` under *Run workflow*), after Environment required reviewers approve. Or deploy by hand:
 
    ```bash
@@ -137,6 +139,52 @@ Notes:
 * Keep `PRIVATE_KEY` per deployment (Sepolia vs Gnosis keys never shared). `TELEGRAM_CHAT_ID` is also a per-deployment secret, even when both deployments post to the same group.
 * After rotation, the next cron tick uses the new value; no Workers restart needed. Old secrets are overwritten in place — delete the local `.secrets.*` file after.
 
+## Running on GitHub Actions
+
+[`keeper-run.yml`](../../.github/workflows/keeper-run.yml) runs one keeper cycle per job: `src/gha/main.ts` reads the deployment's env from `wrangler.jsonc` (by wrangler itself, so the platforms cannot drift), takes only the secrets from the job, and calls the Worker's own `runScheduled`. The run is logged and alerted on exactly as on Cloudflare, and additionally:
+
+- **Failure is the exit code**, so a failed run is a red job and GitHub's own failure email fires alongside Telegram.
+- Failures and warnings become annotations on the run, and the **job summary** has the per-volume table, with explorer links.
+- Telegram alerts link to the run.
+
+### What the scheduler can and cannot do
+
+GitHub's scheduler is the weak part, and it fails quietly:
+
+- `schedule` fires **only on the default branch**.
+- Runs are routinely **5–15 minutes late**, occasionally dropped. The minimum interval is 5 minutes.
+- In a public repository, scheduled workflows are **disabled after 60 days without repository activity**.
+
+So only **Gnosis** is ever scheduled here: hourly, at `:17` (`:00` is the most delayed slot), against ~24 h of `graceBlocks`. **Sepolia cannot be maintained this way** — its `graceBlocks` (~2.4 min) is shorter than the scheduler's ordinary delay — so it stays on Cloudflare, and `keeper-run` only dispatches it by hand to exercise the path.
+
+**Set `HEARTBEAT_URL`.** Telegram cannot say that nothing ran. The runner requests `HEARTBEAT_URL` after every run that maintained its volumes — not a failed run, not a dry run — so a dead-man's-switch service (e.g. [healthchecks.io](https://healthchecks.io) with a 1 h period and ~1 h grace) alerts when the schedule stops firing *or* keeps failing. If the workflow was disabled for inactivity, re-enable it with `gh workflow enable keeper-run.yml`.
+
+### Setup
+
+In repository settings, create Environment **`keeper-<env>`** (`keeper-gnosis`, `keeper-sepolia`) — distinct from the `sepolia`/`gnosis` deploy environments:
+
+- *Deployment branches*: selected, `main` only — so no other branch can run with the key.
+- **No required reviewers** — a reviewer gate would hold every scheduled run.
+- Secrets: `PRIVATE_KEY`, `RPC_URL` (as for the Worker, above), and optionally `HEARTBEAT_URL`.
+
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are **repository** secrets, shared by both deployments since they post to one group; an Environment secret of the same name overrides one for its deployment. Keep `TELEGRAM_CHAT_ID` a *secret*, not a variable: the workflow reads only `secrets.*`, and a step's variables are printed in clear at the top of its public log.
+
+Run logs of this public repository are world-readable. GitHub masks a secret only as the whole stored string, so the runner masks each `RPC_URL` entry, the key with and without `0x`, the token's secret half and `HEARTBEAT_URL` before anything runs; the report scrubber stays behind that.
+
+Then dispatch **keeper-run** (*Run workflow*, choose the deployment). `dry_run` defaults to on. A real run against a deployment that still runs on Cloudflare is only safe with a **different wallet** from the Worker's — the run warns about it.
+
+### Moving `keeper-gnosis` to GitHub Actions
+
+1. Create `keeper-gnosis` as above. Reuse the Worker's funded `PRIVATE_KEY`, or use a fresh key and fund it.
+2. Dispatch `keeper-run` for `gnosis` with `dry_run` on. Check the summary: right registry, wallet and balance, every endpoint healthy.
+3. Stop the Worker: `bunx wrangler delete --env gnosis` (or remove its Cron Trigger in the dashboard). This also deletes its Cloudflare secrets — make sure the key is stored in the Environment first.
+4. Set the **repository** variable `KEEPER_PLATFORM_GNOSIS=github` (the job's `if` cannot see Environment variables). From now on `keeper-run` schedules it, and `keeper-deploy` refuses to recreate the Worker.
+5. Watch the next run at `:17` and the heartbeat.
+
+Stop the Worker *before* setting the variable: the gap is at most an hour against ~24 h of runway, whereas two schedulers on one wallet race for its nonce.
+
+To move back: set `KEEPER_PLATFORM_GNOSIS=cloudflare` (or delete it) so `keeper-run` stops scheduling, then recreate the Worker with the [initial deployment](#initial-worker-deployment) steps.
+
 ## Working on it
 
 ```bash
@@ -156,3 +204,10 @@ curl "localhost:8787/cdn-cgi/local/scheduled?format=json"
 ```
 
 `DRY_RUN` simulates each trigger and sends nothing — the safe way to check a new deployment's RPC and registry. Only `secrets.required` names are read from `.dev.vars`; override anything else with `--var NAME:value`.
+
+The GitHub Actions runner runs locally too, with the secrets in the environment:
+
+```bash
+KEEPER_ENV=sepolia DRY_RUN=true PRIVATE_KEY=0x… RPC_URL=https://… \
+  TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… bun run start:gha
+```
