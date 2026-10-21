@@ -54,14 +54,15 @@ on:
 # a run between sending a transaction and reading its receipt is exactly the
 # uncertainty a keeper should not manufacture for itself.
 concurrency:
-  group: keeper-run-${{ inputs.environment || 'gnosis' }}
+  group: keeper-run-${{ inputs.environment || 'sepolia' }}
   cancel-in-progress: false
 
 jobs:
   run:
-    name: keeper-${{ inputs.environment || 'gnosis' }}
+    name: keeper-${{ inputs.environment || 'sepolia' }}
+    # TEMPORARY, fork test only: schedule targets sepolia, not gnosis.
     # Repository variable: the environment's own are not visible to `if`.
-    if: github.event_name == 'workflow_dispatch' || vars.KEEPER_PLATFORM_GNOSIS == 'github'
+    if: github.event_name == 'workflow_dispatch' || vars.KEEPER_PLATFORM_SEPOLIA == 'github'
     runs-on: ubuntu-latest
     # Covers setup plus the longest run keeper-gnosis allows (~11 min), and
     # stays under the hourly interval. Held to both by test/gha.test.ts.
@@ -69,7 +70,7 @@ jobs:
     permissions:
       contents: read
     environment:
-      name: keeper-${{ inputs.environment || 'gnosis' }}
+      name: keeper-${{ inputs.environment || 'sepolia' }}
     defaults:
       run:
         working-directory: services/keeper
@@ -100,7 +101,7 @@ jobs:
 
       - name: Run keeper
         env:
-          KEEPER_ENV: ${{ inputs.environment || 'gnosis' }}
+          KEEPER_ENV: ${{ inputs.environment || 'sepolia' }}
           KEEPER_CRON: ${{ github.event.schedule }}
           DRY_RUN: ${{ inputs.dry_run }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
