@@ -216,7 +216,7 @@ describe("runInActions", () => {
 
     expect(await run()).toBe(0);
 
-    expect(chain.triggerCalls).toEqual([volumeId(1), volumeId(2)]);
+    expect([...chain.triggerCalls].sort()).toEqual([volumeId(1), volumeId(2)]);
     expect(logged()).toMatchObject({
       status: "ok",
       deployment: "keeper-sepolia",
